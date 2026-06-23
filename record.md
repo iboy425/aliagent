@@ -138,41 +138,63 @@ git push -u origin main
 
 实验编号：Exp-001
 
-时间：待运行
+时间：2026-06-23
 
-目标：按三等奖目标计划落地第一批代码基础设施，包括 A2 推理融合、A1 稳健训练、提交校验工具和 Agent 轨迹增强。
+目标：落地阶段 1 和阶段 2 基础设施：提交文件校验器与 A2 本地离线评分器，为后续优化提供安全检查和离线对比标准。
 
 修改文件：
 
-- 待记录
+- `framework/code/validate_submission.py`
+- `framework/code/a2_offline_eval.py`
+- `record.md`
 
 修改内容：
 
-- 待记录
+- 新增 `validate_submission.py`，校验 `A1.csv`、`A2.csv` 或 `prediction.zip` 的列名、行数、顺序、类别范围、推荐长度、重复 item、非法 item 和 zip 根目录结构。
+- 新增 `a2_offline_eval.py`，从 `train.csv` 切分拟合集/验证集，计算 A2 的 NDCG@10、Hit@10、MRR，并按历史长度分桶分析。
+- A2 离线评分器支持 `popular`、`last_item`、`history`、`hybrid` 四种基础策略，以及 `history_filter=none/soft/hard` 对照。
 
 运行命令：
 
 ```bash
 cd /home/aliagent/framework
-python3 -m py_compile code/*.py agent/*.py main.py
+python3 -m py_compile code/*.py
+python3 code/validate_submission.py --zip_path output/baseline_submitted/prediction_20260623_182014_score_0.2975.zip
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy all --history_filter none --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy all --history_filter hard --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy all --history_filter soft --topk 10
 ```
 
 本地指标：
 
-- 待运行
+- 语法检查通过。
+- baseline 已提交 zip 校验通过：
+  - `A1.csv` 行数 `2751`，类别分布 `{4: 2701, 8: 50}`
+  - `A2.csv` 行数 `10000`，每行 10 个合法候选 item
+- A2 离线评估，`history_filter=none`：
+  - `popular`: `NDCG@10=0.327051`, `Hit@10=0.562250`, `MRR=0.254091`
+  - `last_item`: `NDCG@10=0.508651`, `Hit@10=0.740000`, `MRR=0.436607`
+  - `history`: `NDCG@10=0.527845`, `Hit@10=0.775250`, `MRR=0.450592`
+  - `hybrid`: `NDCG@10=0.522988`, `Hit@10=0.774000`, `MRR=0.444575`
+- A2 离线评估，`history_filter=hard`：
+  - 最优 `history`: `NDCG@10=0.177787`, `Hit@10=0.292125`, `MRR=0.142518`
+- A2 离线评估，`history_filter=soft`：
+  - 最优 `popular`: `NDCG@10=0.254420`, `Hit@10=0.496500`, `MRR=0.179741`
 
 线上指标：
 
-- 待提交
+- 未提交线上。
 
 结论：
 
-- 待记录
+- 阶段 1/2 工具链已跑通。
+- A2 中“硬排除历史 item”会显著降低离线 NDCG；当前 baseline 推理中存在类似逻辑，后续应优先改为不排除或可配置过滤。
+- 历史 item 到 target 的共现信号非常强，离线 `history` 策略明显优于纯热门策略，是下一阶段 A2 提分的优先方向。
 
 是否保留：
 
-- 待定
+- 保留。
 
 下一步：
 
-- 待记录
+- 阶段 3：把 A2 推理逻辑改成可配置的热门度/共现融合，并首先测试 `history_filter=none`。
