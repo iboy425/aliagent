@@ -1,0 +1,7 @@
+# 本地密钥与环境变量配置
+.env.local
+
+# 运行输出
+output/
+__pycache__/
+*.pyc
