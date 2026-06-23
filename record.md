@@ -83,6 +83,57 @@ cd /home/aliagent/framework
 
 ---
 
+## Repo-001 仓库初始化与安全提交
+
+实验编号：Repo-001
+
+时间：2026-06-23
+
+目标：在开始新实验前，将当前 baseline 项目状态提交到 GitHub 仓库，形成可回滚起点。
+
+修改文件：
+
+- `.gitignore`
+- `framework/config.yaml`
+
+修改内容：
+
+- 新增根目录 `.gitignore`，排除 `.env.local`、运行输出、日志、缓存、模型权重和本地工具目录。
+- 将 `framework/config.yaml` 中的明文 API 配置清空，改为通过环境变量读取。
+- 初始化本地 git 仓库，绑定远端 `git@github.com:iboy425/aliagent.git`。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/*.py framework/agent/*.py framework/main.py
+git push -u origin main
+```
+
+本地指标：
+
+- Python 语法检查通过。
+- 密钥扫描未发现 `sk-...` 形式明文 key。
+
+线上指标：
+
+- 不涉及线上评测。
+
+结论：
+
+- 当前 baseline 项目状态已提交到 GitHub。
+- `.env.local`、`framework/output/`、`__pycache__/`、日志和模型/提交产物未入库。
+
+是否保留：
+
+- 保留，作为后续实验前的版本基线。
+
+下一步：
+
+- 在该基线上开始 A2 离线验证与优化实验。
+
+---
+
 ## Exp-001 基础设施与优化代码落地
 
 实验编号：Exp-001
