@@ -12,7 +12,12 @@ from typing import List
 import pandas as pd
 
 from a2_offline_eval import evaluate_strategy, split_train_val
-from rec_heuristics import build_cooccur_stats, build_global_popularity
+from rec_heuristics import (
+    build_cooccur_stats,
+    build_global_popularity,
+    build_user_profile_stats,
+    parse_user_profile_cols,
+)
 
 
 def parse_csv_arg(value: str) -> List[str]:
@@ -23,6 +28,11 @@ def parse_csv_arg(value: str) -> List[str]:
 def parse_int_csv_arg(value: str) -> List[int]:
     """解析逗号分隔整数参数"""
     return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def parse_float_csv_arg(value: str) -> List[float]:
+    """解析逗号分隔浮点参数"""
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
 
 
 def parse_args():
@@ -56,6 +66,24 @@ def parse_args():
         default="none",
         help="逗号分隔的历史item过滤策略",
     )
+    parser.add_argument(
+        "--user_weights",
+        type=str,
+        default="0.0",
+        help="逗号分隔的用户画像权重",
+    )
+    parser.add_argument(
+        "--user_profile_cols",
+        type=str,
+        default="auto",
+        help="用户画像列，auto表示使用user.csv中除uid外全部列",
+    )
+    parser.add_argument(
+        "--pop_penalty_weights",
+        type=str,
+        default="0.0",
+        help="逗号分隔的热门惩罚权重",
+    )
     parser.add_argument("--top_results", type=int, default=20, help="打印前多少个结果")
     parser.add_argument("--output_json", type=str, default="", help="可选JSON输出路径")
     return parser.parse_args()
@@ -70,11 +98,28 @@ def main():
 
     fit_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
     global_pop = build_global_popularity(fit_df)
+    user_col = "uid" if "uid" in train_df.columns else "user_id"
 
     seq_cols = parse_csv_arg(args.seq_cols)
     recent_ns = parse_int_csv_arg(args.recent_ns)
     strategies = parse_csv_arg(args.strategies)
     history_filters = parse_csv_arg(args.history_filters)
+    user_weights = parse_float_csv_arg(args.user_weights)
+    pop_penalty_weights = parse_float_csv_arg(args.pop_penalty_weights)
+
+    user_cols = []
+    user_lookup = None
+    user_profile_stats = None
+    if max(user_weights or [0.0]) > 0:
+        user_df = pd.read_csv(os.path.join(args.data_path, "user.csv"))
+        user_cols = parse_user_profile_cols(user_df, user_col, args.user_profile_cols)
+        if user_cols:
+            user_profile_stats, user_lookup = build_user_profile_stats(
+                train_df=fit_df,
+                user_df=user_df,
+                user_cols=user_cols,
+                user_col=user_col,
+            )
 
     print("=" * 100)
     print("A2启发式参数网格搜索")
@@ -84,6 +129,8 @@ def main():
     print(f"recent_ns={recent_ns}")
     print(f"strategies={strategies}")
     print(f"history_filters={history_filters}")
+    print(f"user_weights={user_weights}, user_cols={user_cols}")
+    print(f"pop_penalty_weights={pop_penalty_weights}")
     print("-" * 100)
 
     results = []
@@ -95,38 +142,47 @@ def main():
             cooccur_stats = build_cooccur_stats(fit_df, seq_col, recent_n=recent_n)
             for history_filter in history_filters:
                 for strategy in strategies:
-                    metrics = evaluate_strategy(
-                        val_df=val_df,
-                        seq_col=seq_col,
-                        candidate_items=candidate_items,
-                        global_pop=global_pop,
-                        cooccur_stats=cooccur_stats,
-                        topk=args.topk,
-                        strategy=strategy,
-                        history_filter=history_filter,
-                        recent_n=recent_n,
-                    )
-                    metrics["seq_col"] = seq_col
-                    metrics["recent_n"] = recent_n
-                    results.append(metrics)
+                    for user_weight in user_weights:
+                        for pop_penalty_weight in pop_penalty_weights:
+                            metrics = evaluate_strategy(
+                                val_df=val_df,
+                                seq_col=seq_col,
+                                candidate_items=candidate_items,
+                                global_pop=global_pop,
+                                cooccur_stats=cooccur_stats,
+                                topk=args.topk,
+                                strategy=strategy,
+                                history_filter=history_filter,
+                                recent_n=recent_n,
+                                user_lookup=user_lookup,
+                                user_profile_stats=user_profile_stats,
+                                user_cols=user_cols,
+                                user_weight=user_weight,
+                                pop_penalty_weight=pop_penalty_weight,
+                            )
+                            metrics["seq_col"] = seq_col
+                            metrics["recent_n"] = recent_n
+                            results.append(metrics)
 
     results = sorted(results, key=lambda item: item["ndcg"], reverse=True)
 
-    print("排名 | seq_col        | recent_n | strategy  | filter | NDCG@10  | Hit@10   | MRR")
-    print("-" * 100)
+    print("排名 | seq_col        | recent_n | strategy  | filter | user_w | pop_pen | NDCG@10  | Hit@10   | MRR")
+    print("-" * 120)
     for rank, item in enumerate(results[:args.top_results], start=1):
         print(
             f"{rank:>4} | {item['seq_col']:<14} | {item['recent_n']:>8} | "
             f"{item['strategy']:<9} | {item['history_filter']:<6} | "
+            f"{item['user_weight']:<6.3f} | {item['pop_penalty_weight']:<7.3f} | "
             f"{item['ndcg']:.6f} | {item['hit']:.6f} | {item['mrr']:.6f}"
         )
 
     best = results[0]
-    print("-" * 100)
+    print("-" * 120)
     print(
         "最佳参数: "
         f"seq_col={best['seq_col']}, recent_n={best['recent_n']}, "
         f"strategy={best['strategy']}, history_filter={best['history_filter']}, "
+        f"user_weight={best['user_weight']}, pop_penalty_weight={best['pop_penalty_weight']}, "
         f"NDCG@{args.topk}={best['ndcg']:.6f}"
     )
 

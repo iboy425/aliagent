@@ -37,6 +37,7 @@ from models import GNNClassifier, GRU4Rec, SASRec
 from datasets import GraphDataset, RecDataset, NegativeSamplingDataset, load_rec_data
 from utils import (
     normalize_adj, random_walk_normalize, sparse_to_torch,
+    preprocess_features, drop_edge_adj, feature_mask_tensor,
     split_train_val, stratified_split, set_seed, get_device,
     compute_accuracy, compute_ndcg, compute_hit_rate, compute_mrr,
     save_checkpoint, setup_logger, log_config,
@@ -91,6 +92,16 @@ def parse_args():
     parser.add_argument('--normalize', type=str, default='symmetric',
                         choices=['symmetric', 'random_walk', 'none'],
                         help='邻接矩阵归一化方式')
+    parser.add_argument('--feature_norm', type=str, default='none',
+                        choices=['none', 'row', 'l2'],
+                        help='节点特征归一化方式')
+    parser.add_argument('--dropedge_rate', type=float, default=0.0,
+                        help='Task1训练前随机丢弃边的比例')
+    parser.add_argument('--feature_mask_rate', type=float, default=0.0,
+                        help='Task1训练期随机遮蔽特征的比例')
+    parser.add_argument('--class_weight', type=str, default='none',
+                        choices=['none', 'balanced'],
+                        help='Task1类别权重策略，balanced用于缓解类别不均衡')
     parser.add_argument('--stratified_split', action='store_true',
                         help='使用分层划分')
 
@@ -107,9 +118,17 @@ def parse_args():
     # 序列推荐特有
     parser.add_argument('--neg_samples', type=int, default=1,
                         help='负采样数量(推荐任务)')
+    parser.add_argument('--neg_sampling_strategy', type=str, default='random',
+                        choices=['random', 'popularity'],
+                        help='负采样策略: random=均匀采样, popularity=按训练target热度采样')
     parser.add_argument('--loss_type', type=str, default='bpr',
                         choices=['bpr', 'ce'],
                         help='损失函数类型: bpr=BPR损失, ce=交叉熵损失')
+    parser.add_argument('--seq_col', type=str, default='auto',
+                        help='Task2历史序列列名，auto优先使用item_seq_dedup')
+    parser.add_argument('--eval_history_filter', type=str, default='none',
+                        choices=['none', 'soft', 'hard'],
+                        help='Task2验证时是否处理历史item，none通常更贴近当前线上反馈')
 
     return parser.parse_args()
 
@@ -128,6 +147,8 @@ def train_task1(args):
     num_nodes = data['num_nodes']
     num_features = data['num_features']
     num_classes = data['num_classes']
+    args.num_features = num_features
+    args.num_classes = num_classes
     logging.info(f"节点数: {num_nodes}, 特征维度: {num_features}, 类别数: {num_classes}")
 
     # 2. 划分训练/验证集
@@ -144,22 +165,32 @@ def train_task1(args):
     # 3. 数据预处理
     device = get_device(args.device)
 
+    # 特征归一化是官方提分建议之一，默认关闭以保持baseline可复现。
+    features_raw = preprocess_features(data['features'], method=args.feature_norm)
+    if args.feature_norm != 'none':
+        logging.info(f"特征归一化: {args.feature_norm}")
+
+    # DropEdge在归一化前执行，后续normalize函数仍会自动补自环。
+    adj_raw = drop_edge_adj(data['adj'], drop_rate=args.dropedge_rate, seed=args.seed)
+    if args.dropedge_rate > 0:
+        logging.info(f"DropEdge: 随机丢弃 {args.dropedge_rate:.2%} 的边")
+
     # 特征转tensor
-    if sp.issparse(data['features']):
-        features = sparse_to_torch(data['features'], device=device)
+    if sp.issparse(features_raw):
+        features = sparse_to_torch(features_raw, device=device)
     else:
-        features = torch.FloatTensor(data['features']).to(device)
+        features = torch.FloatTensor(features_raw).to(device)
 
     # 邻接矩阵归一化
     if args.normalize == 'symmetric':
-        adj = normalize_adj(data['adj']).to(device)
+        adj = normalize_adj(adj_raw).to(device)
     elif args.normalize == 'random_walk':
-        adj = random_walk_normalize(data['adj']).to(device)
+        adj = random_walk_normalize(adj_raw).to(device)
     else:
-        if sp.issparse(data['adj']):
-            adj = sparse_to_torch(data['adj'], device=device)
+        if sp.issparse(adj_raw):
+            adj = sparse_to_torch(adj_raw, device=device)
         else:
-            adj = torch.FloatTensor(data['adj']).to(device)
+            adj = torch.FloatTensor(adj_raw).to(device)
 
     # 标签转tensor
     labels = torch.LongTensor(data['labels']).to(device)
@@ -188,7 +219,14 @@ def train_task1(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=args.patience // 3
     )
-    criterion = nn.CrossEntropyLoss()
+    if args.class_weight == 'balanced':
+        train_labels = labels[train_idx_t]
+        counts = torch.bincount(train_labels, minlength=num_classes).float()
+        weights = counts.sum() / (num_classes * counts.clamp(min=1.0))
+        criterion = nn.CrossEntropyLoss(weight=weights.to(device))
+        logging.info(f"启用类别均衡权重: {weights.cpu().numpy().round(4).tolist()}")
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     # 6. 早停和指标追踪
     early_stop = EarlyStopping(patience=args.patience, mode='max', verbose=True)
@@ -203,7 +241,8 @@ def train_task1(args):
         model.train()
         optimizer.zero_grad()
 
-        logits = model(features, adj)
+        train_features = feature_mask_tensor(features, args.feature_mask_rate)
+        logits = model(train_features, adj)
         loss = criterion(logits[train_idx_t], labels[train_idx_t])
         loss.backward()
         # 梯度裁剪 - 防止梯度爆炸
@@ -291,7 +330,7 @@ def train_task2(args):
 
     # 1. 加载数据
     logging.info(f"加载数据: {args.data_path}")
-    rec_data = load_rec_data(args.data_path, max_seq_len=args.max_len)
+    rec_data = load_rec_data(args.data_path, max_seq_len=args.max_len, seq_col=args.seq_col)
 
     train_seqs, train_targets, train_lens = rec_data['train']
     test_seqs, test_targets, test_lens = rec_data['test']
@@ -299,8 +338,11 @@ def train_task2(args):
     num_items = rec_data['num_items']
     iid2idx = rec_data.get('iid2idx', {})
     idx2iid = rec_data.get('idx2iid', {})
+    args.num_users = num_users
+    args.num_items = num_items
     logging.info(f"用户数: {num_users}, 物品数: {num_items}")
     logging.info(f"训练样本: {len(train_seqs)}, 测试样本: {len(test_seqs)}")
+    logging.info(f"序列列: {rec_data.get('seq_col', args.seq_col)}, max_len={args.max_len}")
 
     # 2. 划分训练/验证集
     n_train = len(train_seqs)
@@ -325,7 +367,8 @@ def train_task2(args):
     if args.loss_type == 'bpr':
         train_dataset = NegativeSamplingDataset(
             trn_seqs, trn_targets, trn_lens, num_items,
-            neg_samples=args.neg_samples
+            neg_samples=args.neg_samples,
+            neg_sampling_strategy=args.neg_sampling_strategy
         )
     else:
         train_dataset = RecDataset(trn_seqs, trn_targets, trn_lens)
@@ -399,19 +442,23 @@ def train_task2(args):
 
                 optimizer.zero_grad()
 
-                # 获取序列表示
-                seq_repr = model(item_seqs, seq_lens)  # (batch, embed_dim)
+                # 获取序列表示。GRU4Rec需要显式长度，SASRec从padding位置推断长度。
+                if args.model_type == 'gru4rec':
+                    seq_repr = model(item_seqs, seq_lens)  # (batch, embed_dim)
+                else:
+                    seq_repr = model(item_seqs)  # (batch, embed_dim)
 
                 # 正样本分数
                 pos_emb = model.item_embedding(targets)  # (batch, embed_dim)
                 pos_score = (seq_repr * pos_emb).sum(dim=-1)  # (batch,)
 
-                # 负样本分数
-                neg_emb = model.item_embedding(neg_items.squeeze(1))  # (batch, embed_dim)
-                neg_score = (seq_repr * neg_emb).sum(dim=-1)  # (batch,)
+                # 负样本分数。官方建议尝试neg_samples>1，因此这里支持
+                # neg_items=(batch, K)，让每个正样本同时和K个负样本比较。
+                neg_emb = model.item_embedding(neg_items)  # (batch, K, embed_dim)
+                neg_score = (seq_repr.unsqueeze(1) * neg_emb).sum(dim=-1)  # (batch, K)
 
                 # BPR损失: -log(sigmoid(pos - neg))
-                loss = -F.logsigmoid(pos_score - neg_score).mean()
+                loss = -F.logsigmoid(pos_score.unsqueeze(1) - neg_score).mean()
 
             else:  # CE损失
                 item_seqs, targets, seq_lens = batch
@@ -421,7 +468,10 @@ def train_task2(args):
 
                 optimizer.zero_grad()
 
-                seq_repr = model(item_seqs, seq_lens)  # (batch, embed_dim)
+                if args.model_type == 'gru4rec':
+                    seq_repr = model(item_seqs, seq_lens)  # (batch, embed_dim)
+                else:
+                    seq_repr = model(item_seqs)  # (batch, embed_dim)
                 scores = seq_repr @ model.item_embedding.weight[1:].T  # (batch, num_items)
                 # 过滤padding target（target=0表示padding）
                 valid_mask = targets > 0
@@ -461,12 +511,17 @@ def train_task2(args):
                 all_item_emb = model.item_embedding.weight[1:]  # (num_items, embed_dim)
                 scores = seq_repr @ all_item_emb.T  # (batch, num_items)
 
-                # 排除历史交互过的物品
-                for i in range(len(item_seqs)):
-                    hist_items = set(item_seqs[i].cpu().numpy())
-                    for item in hist_items:
-                        if 1 <= item <= num_items:
-                            scores[i, item - 1] = -1e10
+                # 验证时是否处理历史item改为可配置。线上反馈显示A2中重复推荐
+                # 历史item可能是有效信号，因此默认不强制过滤。
+                if args.eval_history_filter != 'none':
+                    for i in range(len(item_seqs)):
+                        hist_items = set(item_seqs[i].cpu().numpy())
+                        for item in hist_items:
+                            if 1 <= item <= num_items:
+                                if args.eval_history_filter == 'hard':
+                                    scores[i, item - 1] = -1e10
+                                elif args.eval_history_filter == 'soft':
+                                    scores[i, item - 1] *= 0.5
 
                 # 取Top-K
                 _, top_indices = torch.topk(scores, k=10, dim=-1)
@@ -533,7 +588,9 @@ def train_task2(args):
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'args': vars(args)
+        'args': vars(args),
+        'iid2idx': iid2idx,
+        'idx2iid': idx2iid,
     }, final_path)
 
     # 保存训练历史

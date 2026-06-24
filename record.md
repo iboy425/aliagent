@@ -363,3 +363,112 @@ python3 code/validate_submission.py --zip_path output/exp003_raw_recent10/predic
 
 - 若今日仍有提交次数，优先提交 `framework/output/exp003_raw_recent10/prediction.zip` 验证线上 A2。
 - 若线上继续提升，再围绕 `item_seq_raw + recent_n=10` 做轻量融合或 A1 提升。
+
+---
+
+## Exp-004 官方提分方向能力补齐与用户画像候选
+
+实验编号：Exp-004
+
+时间：2026-06-24
+
+目标：根据官方提分指南补齐可实验能力，包括 A1 特征/图增强、A2 序列训练增强、用户画像融合和热门惩罚，并生成一个符合官方方向的 A2 候选提交包。
+
+修改文件：
+
+- `framework/code/utils.py`
+- `framework/code/train.py`
+- `framework/code/datasets.py`
+- `framework/code/rec_heuristics.py`
+- `framework/code/infer.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/a2_grid_search.py`
+- `record.md`
+
+修改内容：
+
+- Task 1 新增官方建议的数据增强开关：
+  - `--feature_norm none|row|l2`：节点特征归一化。
+  - `--dropedge_rate`：训练前随机丢弃部分边。
+  - `--feature_mask_rate`：训练期随机遮蔽部分节点特征。
+  - `--class_weight none|balanced`：按类别频次给交叉熵加权。
+- Task 1 推理阶段读取 checkpoint 中的 `feature_norm`，保证训练和推理预处理一致；DropEdge 只在训练使用。
+- Task 2 训练新增官方建议的可控项：
+  - `--seq_col`：选择 `item_seq_raw` 或 `item_seq_dedup`。
+  - `--neg_sampling_strategy random|popularity`。
+  - `--eval_history_filter none|soft|hard`。
+- 修复 Task 2 BPR 多负样本路径，支持 `--neg_samples > 1`。
+- 修复 Task 2 `SASRec + CE` 训练路径，避免把 `seq_lens` 传给只接收序列的 SASRec。
+- Task 2 启发式推理新增用户画像融合：
+  - 从 `user.csv` 的 `u_cat_01` 到 `u_cat_08` 统计画像分组 target 热门度。
+  - 推理时用 `--user_weight` 控制画像分数融合强度。
+- Task 2 启发式推理新增 `--pop_penalty_weight`，用于测试官方建议的热门惩罚。
+- A2 离线评估器和网格搜索器同步支持用户画像权重和热门惩罚权重，保证离线与提交逻辑一致。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/*.py framework/agent/*.py framework/main.py
+
+cd /home/aliagent/framework
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.01 --user_profile_cols auto
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.02 --user_profile_cols auto
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.03 --user_profile_cols auto
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.04 --user_profile_cols auto
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.05 --user_profile_cols auto
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --pop_penalty_weight 0.02
+
+python3 code/infer.py --task task2 --data_path data/rec_data --output_path output/exp004_official_user002/A2.csv --rec_strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --user_weight 0.02 --user_profile_cols auto --device cpu
+unzip -p output/baseline_submitted/prediction_20260623_182014_score_0.2975.zip A1.csv > output/exp004_official_user002/A1.csv
+zip -j output/exp004_official_user002/prediction.zip output/exp004_official_user002/A1.csv output/exp004_official_user002/A2.csv
+python3 code/validate_submission.py --zip_path output/exp004_official_user002/prediction.zip
+
+python3 code/train.py --task task1 --data_path data/cls_data/A1.npz --output_dir output/smoke_a1_official --epochs 1 --model_type sage --hidden_dim 16 --num_layers 2 --feature_norm row --dropedge_rate 0.05 --feature_mask_rate 0.1 --class_weight balanced --stratified_split --device cpu --log_interval 1
+python3 code/train.py --task task2 --data_path data/rec_data --output_dir output/smoke_a2_sasrec_neg5 --epochs 1 --model_type sasrec --embedding_dim 16 --num_layers 1 --num_heads 2 --max_len 30 --batch_size 1024 --loss_type bpr --neg_samples 5 --neg_sampling_strategy random --seq_col item_seq_raw --eval_history_filter none --device cpu --log_interval 1
+python3 code/train.py --task task2 --data_path data/rec_data --output_dir output/smoke_a2_sasrec_ce --epochs 1 --model_type sasrec --embedding_dim 16 --num_layers 1 --num_heads 2 --max_len 30 --batch_size 1024 --loss_type ce --seq_col item_seq_raw --eval_history_filter none --device cpu --log_interval 1
+```
+
+本地指标：
+
+- Python 语法检查通过。
+- A2 Exp-003 对照：`item_seq_raw + recent_n=10 + history_filter=none`，`NDCG@10=0.544448`，`Hit@10=0.779750`，`MRR=0.470771`。
+- 用户画像融合：
+  - `user_weight=0.01`: `NDCG@10=0.544531`
+  - `user_weight=0.02`: `NDCG@10=0.544541`
+  - `user_weight=0.03`: `NDCG@10=0.544524`
+  - `user_weight=0.04`: `NDCG@10=0.544492`
+  - `user_weight=0.05`: `NDCG@10=0.544478`
+- 热门惩罚：
+  - `pop_penalty_weight=0.02`: `NDCG@10=0.543714`，本地负向，暂不启用。
+- 新候选包 `output/exp004_official_user002/prediction.zip` 校验通过：
+  - `A1.csv` 行数 `2751`，类别分布 `{4: 2701, 8: 50}`
+  - `A2.csv` 行数 `10000`，每行 10 个合法候选 item
+  - 与 Exp-003 相比，A2 有 `3686/10000` 行 prediction 发生变化。
+- Smoke test：
+  - A1 `feature_norm=row + DropEdge=0.05 + FeatureMask=0.1 + class_weight=balanced` 1 epoch 跑通。
+  - A2 `SASRec + BPR + neg_samples=5` 1 epoch 跑通。
+  - A2 `SASRec + CE` 1 epoch 跑通。
+
+线上指标：
+
+- 未提交线上。
+
+结论：
+
+- 官方提分指南中的主要可实验开关已经落到代码里。
+- A2 用户画像融合只有非常小的本地提升，推荐作为低风险候选提交，但线上收益不保证。
+- 热门惩罚当前本地为负向，暂不建议提交启用。
+- A1 增强能力已跑通，但尚未做完整训练和线上验证；后续应先小网格比较 `feature_norm`、`class_weight`、`dropedge_rate`，再考虑替换 A1。
+
+是否保留：
+
+- 保留。
+
+下一步：
+
+- 若还有 A 榜提交次数，可以优先比较：
+  - 更稳妥：提交 Exp-003 `output/exp003_raw_recent10/prediction.zip`。
+  - 官方融合候选：提交 Exp-004 `output/exp004_official_user002/prediction.zip`。
+- 后续不要先大跑 SASRec；当前启发式 A2 已明显更强，训练模型应作为融合补充而不是主替换。

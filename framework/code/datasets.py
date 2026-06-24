@@ -178,12 +178,13 @@ class NegativeSamplingDataset(Dataset):
                 self.seq_lengths[idx])
 
 
-def load_rec_data(data_dir, max_seq_len=50):
+def load_rec_data(data_dir, max_seq_len=50, seq_col='auto'):
     """加载推荐数据并构建序列
 
     Args:
         data_dir: 包含train.csv和test.csv的目录
         max_seq_len: 最大序列长度
+        seq_col: 历史序列列名；auto表示按 item_seq_dedup -> item_seq_raw 自动选择
 
     Returns:
         训练数据和测试数据的字典，包含:
@@ -252,19 +253,27 @@ def load_rec_data(data_dir, max_seq_len=50):
         items = [x.strip() for x in str(seq_str).split(',') if x.strip()]
         return [iid2idx.get(item, 0) for item in items]
 
+    def parse_row_seq(row, df_columns):
+        """按配置解析单行历史序列"""
+        if seq_col != 'auto':
+            if seq_col not in df_columns:
+                raise ValueError(f"指定的序列列不存在: {seq_col}")
+            return parse_seq(row.get(seq_col), iid2idx)
+
+        for col in ['item_seq_dedup', 'item_seq_raw', 'item_seq']:
+            if col in df_columns:
+                seq = parse_seq(row.get(col), iid2idx)
+                if len(seq) > 0:
+                    return seq
+        return []
+
     # 构建训练序列
     train_seqs, train_targets, train_lens = [], [], []
     for _, row in train_df.iterrows():
         target_iid = str(row[target_col])
         target_idx = iid2idx.get(target_iid, 0)
 
-        # 优先使用 item_seq_dedup，其次 item_seq_raw
-        seq = []
-        for col in ['item_seq_dedup', 'item_seq_raw']:
-            if col in train_df.columns:
-                seq = parse_seq(row[col], iid2idx)
-                if len(seq) > 0:
-                    break
+        seq = parse_row_seq(row, train_df.columns)
 
         # 序列截断/填充
         if len(seq) > max_seq_len:
@@ -279,12 +288,7 @@ def load_rec_data(data_dir, max_seq_len=50):
     # 构建测试序列
     test_seqs, test_targets, test_lens = [], [], []
     for _, row in test_df.iterrows():
-        seq = []
-        for col in ['item_seq_dedup', 'item_seq_raw']:
-            if col in test_df.columns:
-                seq = parse_seq(row[col], iid2idx)
-                if len(seq) > 0:
-                    break
+        seq = parse_row_seq(row, test_df.columns)
 
         if len(seq) > max_seq_len:
             seq = seq[-max_seq_len:]
@@ -302,4 +306,5 @@ def load_rec_data(data_dir, max_seq_len=50):
         'num_items': num_items,
         'iid2idx': iid2idx,
         'idx2iid': idx2iid,
+        'seq_col': seq_col,
     }

@@ -105,6 +105,117 @@ def sparse_to_torch(sparse_mx, device='cpu', return_sparse=False):
         raise TypeError(f"不支持的类型: {type(sparse_mx)}")
 
 
+def preprocess_features(features, method='none'):
+    """特征矩阵归一化
+
+    官方提分建议中提到的特征工程，核心目的是减少不同节点特征
+    尺度差异过大带来的训练不稳定。这里保持可配置：
+    - none: 不处理，完全复现原始baseline。
+    - row: 每个节点的特征和归一到1，适合稀疏计数类特征。
+    - l2: 每个节点特征向量做L2归一化，适合向量幅度差异明显的场景。
+
+    Args:
+        features: scipy稀疏矩阵、numpy数组或torch.Tensor
+        method: 归一化方式，none/row/l2
+
+    Returns:
+        与输入类型相近的归一化特征矩阵。
+    """
+    if method == 'none' or method is None:
+        return features
+    if method not in {'row', 'l2'}:
+        raise ValueError(f"未知特征归一化方式: {method}")
+
+    if sp.issparse(features):
+        features = features.tocsr().astype(np.float32)
+        if method == 'row':
+            scale = np.asarray(features.sum(axis=1)).reshape(-1)
+        else:
+            scale = np.sqrt(np.asarray(features.multiply(features).sum(axis=1)).reshape(-1))
+        inv = np.zeros_like(scale, dtype=np.float32)
+        nonzero = scale > 0
+        inv[nonzero] = 1.0 / scale[nonzero]
+        return sp.diags(inv).dot(features).tocsr()
+
+    if isinstance(features, torch.Tensor):
+        if method == 'row':
+            denom = features.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        else:
+            denom = torch.norm(features, p=2, dim=1, keepdim=True).clamp(min=1e-12)
+        return features / denom
+
+    features = np.asarray(features, dtype=np.float32)
+    if method == 'row':
+        denom = features.sum(axis=1, keepdims=True)
+    else:
+        denom = np.linalg.norm(features, ord=2, axis=1, keepdims=True)
+    denom[denom <= 0] = 1.0
+    return features / denom
+
+
+def drop_edge_adj(adj, drop_rate=0.0, seed=42):
+    """随机丢弃图中的一部分边
+
+    DropEdge是图神经网络中常见的数据增强方式。直觉上，它让模型
+    不能每轮都依赖完全相同的邻居结构，从而降低对局部连接的过拟合。
+    这里在归一化前处理邻接矩阵，后续 `normalize_adj` 仍会补自环。
+
+    Args:
+        adj: 邻接矩阵，scipy稀疏矩阵、numpy数组或torch.Tensor
+        drop_rate: 丢边比例，0表示关闭
+        seed: 随机种子
+
+    Returns:
+        丢边后的邻接矩阵。
+    """
+    if drop_rate <= 0:
+        return adj
+    if not 0 <= drop_rate < 1:
+        raise ValueError(f"drop_rate必须在[0,1)之间，当前为: {drop_rate}")
+
+    rng = np.random.default_rng(seed)
+    keep_rate = 1.0 - drop_rate
+
+    if sp.issparse(adj):
+        adj_coo = adj.tocoo().astype(np.float32)
+        keep_mask = rng.random(adj_coo.nnz) < keep_rate
+        dropped = sp.coo_matrix(
+            (adj_coo.data[keep_mask], (adj_coo.row[keep_mask], adj_coo.col[keep_mask])),
+            shape=adj_coo.shape,
+        )
+        return dropped.tocsr()
+
+    if isinstance(adj, torch.Tensor):
+        mask = (torch.rand_like(adj, dtype=torch.float32) < keep_rate).to(adj.device)
+        return adj * mask
+
+    adj = np.asarray(adj, dtype=np.float32)
+    mask = rng.random(adj.shape) < keep_rate
+    return adj * mask
+
+
+def feature_mask_tensor(features, mask_rate=0.0):
+    """训练期随机遮蔽部分节点特征
+
+    Feature Masking类似特征级Dropout。它不改变验证/推理输入，只在训练
+    前向时随机把一部分特征置零，迫使模型综合利用更多维度。
+
+    Args:
+        features: torch.Tensor格式特征矩阵
+        mask_rate: 遮蔽比例，0表示关闭
+
+    Returns:
+        遮蔽后的特征矩阵。
+    """
+    if mask_rate <= 0:
+        return features
+    if not 0 <= mask_rate < 1:
+        raise ValueError(f"mask_rate必须在[0,1)之间，当前为: {mask_rate}")
+    keep_prob = 1.0 - mask_rate
+    mask = torch.empty_like(features).bernoulli_(keep_prob)
+    return features * mask / keep_prob
+
+
 # ===== 数据划分工具 =====
 
 def split_train_val(train_idx, val_ratio=0.2, seed=42):

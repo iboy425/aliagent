@@ -32,12 +32,16 @@ from datasets import GraphDataset, RecDataset, load_rec_data
 from rec_heuristics import (
     build_cooccur_stats,
     build_global_popularity,
+    build_user_profile_stats,
     choose_seq_col,
+    get_user_profile_counters,
     parse_seq,
+    parse_user_profile_cols,
     rank_items,
 )
 from utils import (
     normalize_adj, random_walk_normalize, sparse_to_torch,
+    preprocess_features,
     set_seed, get_device, setup_logger
 )
 
@@ -87,6 +91,12 @@ def parse_args():
                         help='A2热门度分数融合权重')
     parser.add_argument('--cooccur_weight', type=float, default=1.0,
                         help='A2历史共现分数融合权重')
+    parser.add_argument('--user_weight', type=float, default=0.0,
+                        help='A2用户画像分组热门度融合权重')
+    parser.add_argument('--user_profile_cols', type=str, default='auto',
+                        help='A2用户画像列，auto表示使用user.csv中除uid外全部列，空字符串表示关闭')
+    parser.add_argument('--pop_penalty_weight', type=float, default=0.0,
+                        help='A2热门item惩罚权重，用于提升推荐多样性')
 
     return parser.parse_args()
 
@@ -193,16 +203,18 @@ def infer_task1(args):
     num_classes = data['num_classes']
     logging.info(f"测试节点数: {len(test_idx)}, 特征维度: {num_features}, 类别数: {num_classes}")
 
-    # 2. 数据预处理
-    if sp.issparse(data['features']):
-        features = sparse_to_torch(data['features'], device=device)
-    else:
-        features = torch.FloatTensor(data['features']).to(device)
-
-    # 加载checkpoint获取归一化方式
+    # 加载checkpoint获取训练时的数据预处理方式
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     saved_args = checkpoint.get('args', {})
     normalize_type = saved_args.get('normalize', 'symmetric')
+    feature_norm = saved_args.get('feature_norm', 'none')
+
+    # 2. 数据预处理。特征归一化必须与训练阶段保持一致。
+    features_raw = preprocess_features(data['features'], method=feature_norm)
+    if sp.issparse(features_raw):
+        features = sparse_to_torch(features_raw, device=device)
+    else:
+        features = torch.FloatTensor(features_raw).to(device)
 
     # 邻接矩阵归一化(需与训练时一致)
     if normalize_type == 'symmetric':
@@ -411,11 +423,34 @@ def infer_task2_v2(args):
 
     global_pop = build_global_popularity(train_df)
     cooccur_stats = build_cooccur_stats(train_df, train_seq_col, recent_n=args.recent_n)
+
+    user_cols = []
+    user_lookup = None
+    user_profile_stats = None
+    user_path = f'{args.data_path}/user.csv'
+    if args.user_weight > 0:
+        if os.path.exists(user_path):
+            user_df = pd.read_csv(user_path)
+            user_cols = parse_user_profile_cols(user_df, user_col, args.user_profile_cols)
+            if user_cols:
+                user_profile_stats, user_lookup = build_user_profile_stats(
+                    train_df=train_df,
+                    user_df=user_df,
+                    user_cols=user_cols,
+                    user_col=user_col,
+                )
+                logging.info(f"启用用户画像融合: cols={user_cols}, weight={args.user_weight:.3f}")
+            else:
+                logging.warning("user_weight>0，但未选择任何用户画像列，画像融合关闭")
+        else:
+            logging.warning("user_weight>0，但未找到user.csv，画像融合关闭")
+
     logging.info(
         "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
-        "weights(model/pop/cooccur)=%.3f/%.3f/%.3f",
+        "weights(model/pop/cooccur/user)=%.3f/%.3f/%.3f/%.3f, pop_penalty=%.3f",
         args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
-        args.model_weight, args.pop_weight, args.cooccur_weight,
+        args.model_weight, args.pop_weight, args.cooccur_weight, args.user_weight,
+        args.pop_penalty_weight,
     )
     logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
@@ -476,6 +511,12 @@ def infer_task2_v2(args):
         user_id = str(row[user_col])
         items = parse_seq(row.get(test_seq_col))
         model_scores = get_model_scores(items) if args.rec_strategy in {'model', 'hybrid'} else None
+        user_counters = get_user_profile_counters(
+            user_id=user_id,
+            user_lookup=user_lookup,
+            user_profile_stats=user_profile_stats,
+            user_cols=user_cols,
+        )
         recs = rank_items(
             seq=items,
             candidate_items=candidate_items,
@@ -486,9 +527,12 @@ def infer_task2_v2(args):
             history_filter=args.history_filter,
             recent_n=args.recent_n,
             model_scores=model_scores,
+            user_profile_counters=user_counters,
             model_weight=args.model_weight,
             pop_weight=args.pop_weight,
             cooccur_weight=args.cooccur_weight,
+            user_weight=args.user_weight,
+            pop_penalty_weight=args.pop_penalty_weight,
         )
         result_rows.append({
             'uid': user_id,
