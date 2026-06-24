@@ -472,3 +472,99 @@ python3 code/train.py --task task2 --data_path data/rec_data --output_dir output
   - 更稳妥：提交 Exp-003 `output/exp003_raw_recent10/prediction.zip`。
   - 官方融合候选：提交 Exp-004 `output/exp004_official_user002/prediction.zip`。
 - 后续不要先大跑 SASRec；当前启发式 A2 已明显更强，训练模型应作为融合补充而不是主替换。
+
+---
+
+## Exp-006 A1稳健训练与A2官方SASRec验证
+
+实验编号：Exp-006
+
+时间：2026-06-24
+
+目标：按官方提分方向重新训练 A1/A2，但避免“所有增强全开”。先用 A1 稳健配置追求 Accuracy，再用 A2 SASRec 官方配置验证深度序列模型是否有机会超过当前启发式。
+
+修改文件：
+
+- `record.md`
+
+修改内容：
+
+- 本轮不改代码，只运行训练、推理、打包和校验。
+- A1 先尝试过 `class_weight=balanced` 的全增强配置，验证准确率长期偏低，人工中断；结论是类别均衡损失不适合当前线上 Accuracy 目标。
+- A1 改用稳健配置：GraphSAGE、hidden_dim=256、2层、分层验证、无类别权重、无 DropEdge/FeatureMask。
+- A2 启动官方 SASRec 大配置：`item_seq_raw`、`max_len=100`、`embedding_dim=128`、`num_layers=2`、`num_heads=4`、`neg_samples=5`、BPR。
+- A2 SASRec 前 5 轮验证 NDCG 明显低于启发式，停止训练，保留为“官方模型路线已验证但暂不替换”的结论。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+
+# A1 反例：全增强 + class_weight，验证指标低，人工中断
+python3 code/train.py --task task1 --data_path data/cls_data/A1.npz --output_dir output/exp005_a1_sage_official_full --epochs 300 --model_type sage --hidden_dim 256 --num_layers 3 --lr 0.005 --dropout 0.5 --weight_decay 0.0005 --patience 30 --normalize symmetric --feature_norm row --dropedge_rate 0.05 --feature_mask_rate 0.05 --class_weight balanced --stratified_split --device cpu --log_interval 5
+
+# A1 正式候选：稳健 GraphSAGE
+python3 code/train.py --task task1 --data_path data/cls_data/A1.npz --output_dir output/exp006_a1_sage_stable --epochs 300 --model_type sage --hidden_dim 256 --num_layers 2 --lr 0.005 --dropout 0.5 --weight_decay 0.0005 --patience 40 --normalize symmetric --feature_norm none --dropedge_rate 0 --feature_mask_rate 0 --class_weight none --stratified_split --device cpu --log_interval 5
+python3 code/infer.py --task task1 --data_path data/cls_data/A1.npz --checkpoint output/exp006_a1_sage_stable/best_model.pt --output_path output/exp006_a1_sage_stable/A1.csv --device cpu
+
+# A2 官方模型验证：SASRec + 多负样本，前5轮后因远低于启发式而停止
+python3 code/train.py --task task2 --data_path data/rec_data --output_dir output/exp006_a2_sasrec_official --epochs 80 --model_type sasrec --embedding_dim 128 --num_layers 2 --num_heads 4 --max_len 100 --batch_size 512 --loss_type bpr --neg_samples 5 --neg_sampling_strategy random --seq_col item_seq_raw --eval_history_filter none --lr 0.001 --dropout 0.2 --weight_decay 0.00001 --patience 12 --device cpu --log_interval 2
+
+# 组合提交包
+mkdir -p output/exp006_submit_a1_stable_a2_exp003
+mkdir -p output/exp006_submit_a1_stable_a2_exp004
+cp output/exp006_a1_sage_stable/A1.csv output/exp006_submit_a1_stable_a2_exp003/A1.csv
+cp output/exp006_a1_sage_stable/A1.csv output/exp006_submit_a1_stable_a2_exp004/A1.csv
+unzip -p output/exp003_raw_recent10/prediction.zip A2.csv > output/exp006_submit_a1_stable_a2_exp003/A2.csv
+unzip -p output/exp004_official_user002/prediction.zip A2.csv > output/exp006_submit_a1_stable_a2_exp004/A2.csv
+zip -j output/exp006_submit_a1_stable_a2_exp003/prediction.zip output/exp006_submit_a1_stable_a2_exp003/A1.csv output/exp006_submit_a1_stable_a2_exp003/A2.csv
+zip -j output/exp006_submit_a1_stable_a2_exp004/prediction.zip output/exp006_submit_a1_stable_a2_exp004/A1.csv output/exp006_submit_a1_stable_a2_exp004/A2.csv
+python3 code/validate_submission.py --zip_path output/exp006_submit_a1_stable_a2_exp003/prediction.zip
+python3 code/validate_submission.py --zip_path output/exp006_submit_a1_stable_a2_exp004/prediction.zip
+```
+
+本地指标：
+
+- A1 全增强 + `class_weight=balanced`：
+  - 人工中断前验证准确率约 `0.1498`，明显不适合提交。
+  - 原因判断：类别均衡权重更关注少数类，但线上指标是总体 Accuracy，导致主类准确率受损。
+- A1 稳健 GraphSAGE：
+  - 最优验证准确率：`0.632877`
+  - 最优 epoch：`146`
+  - 训练集准确率后期约 `0.996`，说明模型容量充足，也开始过拟合；使用 best checkpoint。
+  - 新 A1 与 baseline A1 相比，`1483/2751` 行预测变化。
+  - 新 A1 类别分布：`{0: 65, 1: 382, 2: 254, 3: 69, 4: 1262, 5: 44, 6: 54, 7: 144, 8: 447, 9: 30}`。
+  - baseline A1 类别分布：`{4: 2701, 8: 50}`。
+- A2 SASRec 官方配置：
+  - Epoch 1：`Val NDCG@10=0.2078`
+  - Epoch 2：`Val NDCG@10=0.2241`
+  - Epoch 3：`Val NDCG@10≈0.2294`
+  - Epoch 4：`Val NDCG@10=0.2405`
+  - Epoch 5：`Val NDCG@10≈0.2415`
+  - 明显低于当前启发式离线 `NDCG@10=0.544448`，停止训练。
+- 提交包校验：
+  - `output/exp006_submit_a1_stable_a2_exp003/prediction.zip` 校验通过。
+  - `output/exp006_submit_a1_stable_a2_exp004/prediction.zip` 校验通过。
+
+线上指标：
+
+- 未提交线上。
+
+结论：
+
+- A1 不应该开启 `class_weight=balanced`；稳健 SAGE 配置明显更好。
+- A1 新候选值得提交验证，尤其因为本地验证从 baseline 快速复现的低准确率提升到 `0.6329`。
+- A2 官方 SASRec 训练可以跑通，但当前不适合作为主提交方案；A2 仍应使用 `item_seq_raw + recent_n=10 + history_filter=none` 的启发式共现路线。
+- 当前最建议提交：
+  - 首选：`framework/output/exp006_submit_a1_stable_a2_exp003/prediction.zip`
+  - 备选：`framework/output/exp006_submit_a1_stable_a2_exp004/prediction.zip`
+
+是否保留：
+
+- 保留 A1 稳健模型和两个提交候选包。
+- 不保留 A2 SASRec 作为当前提交主模型。
+
+下一步：
+
+- 先提交 `exp006_submit_a1_stable_a2_exp003/prediction.zip`，验证新 A1 是否提升线上分类分数。
+- 如果线上 A1 提升明显，再考虑用同一 A1 组合 Exp-004 A2 用户画像融合版本。
