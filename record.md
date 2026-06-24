@@ -198,3 +198,83 @@ python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed
 下一步：
 
 - 阶段 3：把 A2 推理逻辑改成可配置的热门度/共现融合，并首先测试 `history_filter=none`。
+
+---
+
+## Exp-002 A2共现推理融合
+
+实验编号：Exp-002
+
+时间：2026-06-24
+
+目标：把阶段 2 离线验证出的 A2 强信号接入正式推理链路，支持热门度、历史共现、模型分数融合，并显式控制是否过滤历史 item。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/infer.py`
+- `record.md`
+
+修改内容：
+
+- 新增 `rec_heuristics.py`，抽出 A2 推荐公共逻辑：序列解析、热门度统计、历史 item 到 target 的共现统计、模型/热门/共现分数融合、历史 item 过滤和 TopK 补齐。
+- `a2_offline_eval.py` 改为调用公共推荐逻辑，保证离线评估与正式推理使用同一套排序规则。
+- `infer.py` 的 Task 2 推理新增可控参数：
+  - `--rec_strategy model|popular|last_item|history|hybrid`
+  - `--history_filter none|soft|hard`
+  - `--seq_col`
+  - `--recent_n`
+  - `--model_weight`
+  - `--pop_weight`
+  - `--cooccur_weight`
+- Task 2 允许不提供 checkpoint，便于直接生成热门度/共现启发式推荐；Task 1 仍要求 checkpoint。
+- Task 2 输出顺序改为严格保持 `test.csv` 原始顺序，不再按 `uid` 排序。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/*.py framework/agent/*.py framework/main.py
+
+cd /home/aliagent/framework
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy all --history_filter none --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy all --history_filter hard --topk 10
+python3 code/infer.py --task task2 --data_path data/rec_data --output_path output/exp002_history_none/A2.csv --rec_strategy history --history_filter none --topk 10 --recent_n 20 --device cpu
+unzip -p output/baseline_submitted/prediction_20260623_182014_score_0.2975.zip A1.csv > output/exp002_history_none/A1.csv
+zip -j output/exp002_history_none/prediction.zip output/exp002_history_none/A1.csv output/exp002_history_none/A2.csv
+python3 code/validate_submission.py --zip_path output/exp002_history_none/prediction.zip
+```
+
+本地指标：
+
+- Python 语法检查通过。
+- 离线评估保持阶段 2 结论：
+  - `history_filter=none` 下，`history` 策略 `NDCG@10=0.527845`, `Hit@10=0.775250`, `MRR=0.450592`
+  - `history_filter=hard` 下，`history` 策略 `NDCG@10=0.177787`, `Hit@10=0.292125`, `MRR=0.142518`
+- 新生成 `output/exp002_history_none/A2.csv`：
+  - 行数 `10000`
+  - 每行推荐 `10` 个合法 item
+  - 与 baseline A2 相比，`10000/10000` 行 prediction 发生变化
+- 候选提交包 `output/exp002_history_none/prediction.zip` 校验通过：
+  - `A1.csv` 行数 `2751`，类别分布 `{4: 2701, 8: 50}`
+  - `A2.csv` 行数 `10000`，候选 item 数 `2156`
+
+线上指标：
+
+- 未提交线上。
+
+结论：
+
+- A2 正式推理链路已支持不依赖 checkpoint 的历史共现推荐。
+- 当前候选包只替换 A2，A1 沿用 baseline；如果提交线上，可直接观察 A2 改动收益。
+- 离线结果强烈支持 `history_filter=none`，暂不建议继续使用硬过滤历史 item。
+
+是否保留：
+
+- 保留。
+
+下一步：
+
+- 可选择将 `output/exp002_history_none/prediction.zip` 提交 A 榜验证 A2 线上收益。
+- 若线上提升，再继续做 `recent_n`、`seq_col`、`hybrid` 权重网格搜索。

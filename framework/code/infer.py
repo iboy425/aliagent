@@ -29,6 +29,13 @@ from torch.utils.data import DataLoader
 
 from models import GNNClassifier, GRU4Rec, SASRec
 from datasets import GraphDataset, RecDataset, load_rec_data
+from rec_heuristics import (
+    build_cooccur_stats,
+    build_global_popularity,
+    choose_seq_col,
+    parse_seq,
+    rank_items,
+)
 from utils import (
     normalize_adj, random_walk_normalize, sparse_to_torch,
     set_seed, get_device, setup_logger
@@ -44,8 +51,8 @@ def parse_args():
                         help='任务类型: task1=图分类, task2=序列推荐')
     parser.add_argument('--data_path', type=str, required=True,
                         help='数据路径: task1为.npz文件, task2为数据目录')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='模型检查点路径')
+    parser.add_argument('--checkpoint', type=str, default='',
+                        help='模型检查点路径；task2启发式策略可不提供')
     parser.add_argument('--output_path', type=str, required=True,
                         help='输出CSV文件路径')
 
@@ -62,6 +69,24 @@ def parse_args():
     # 可选: 集成多个模型
     parser.add_argument('--ensemble_checkpoints', type=str, nargs='+', default=None,
                         help='多个检查点路径,用于集成推理')
+
+    # A2推荐后处理/启发式融合
+    parser.add_argument('--rec_strategy', type=str, default='model',
+                        choices=['model', 'popular', 'last_item', 'history', 'hybrid'],
+                        help='A2推荐策略: model=模型分数, popular=热门, history=历史共现, hybrid=融合')
+    parser.add_argument('--history_filter', type=str, default='none',
+                        choices=['none', 'soft', 'hard'],
+                        help='A2是否处理历史item: none=保留, soft=降权, hard=删除')
+    parser.add_argument('--seq_col', type=str, default='auto',
+                        help='A2历史序列列名，默认自动选择 item_seq_dedup')
+    parser.add_argument('--recent_n', type=int, default=20,
+                        help='A2共现召回使用最近多少个历史item')
+    parser.add_argument('--model_weight', type=float, default=1.0,
+                        help='A2模型分数融合权重')
+    parser.add_argument('--pop_weight', type=float, default=1.0,
+                        help='A2热门度分数融合权重')
+    parser.add_argument('--cooccur_weight', type=float, default=1.0,
+                        help='A2历史共现分数融合权重')
 
     return parser.parse_args()
 
@@ -151,6 +176,9 @@ def infer_task1(args):
     加载图数据和训练好的GNN模型,对测试节点进行分类预测,
     输出结果到CSV文件。
     """
+    if not args.checkpoint:
+        raise ValueError("Task 1推理必须提供 --checkpoint")
+
     logging.info("=" * 60)
     logging.info("开始 Task 1 推理 - GNN节点分类")
     logging.info("=" * 60)
@@ -360,105 +388,121 @@ def infer_task2(args):
 
 
 def infer_task2_v2(args):
-    """Task 2推理 - 简化版(逐用户推理)
+    """Task 2推理 - 支持模型/热门度/历史共现融合
 
-    这个版本直接在测试数据上为每个用户生成Top-10推荐,
-    不需要逐序列预测,更适合竞赛提交格式。
+    旧版推理只使用序列模型分数，并且默认硬排除历史item。离线验证发现，
+    A2训练集中大量target会重复出现在历史序列中，硬排除会显著降低NDCG。
+    因此这里把历史过滤改为可配置，并加入热门度、历史共现等轻量信号。
     """
     logging.info("=" * 60)
-    logging.info("开始 Task 2 推理 (v2) - 序列推荐")
+    logging.info("开始 Task 2 推理 (v2) - 序列推荐融合")
     logging.info("=" * 60)
 
     device = get_device(args.device)
 
-    # 1. 读取测试数据
+    # 1. 读取训练/测试/候选item数据
+    train_df = pd.read_csv(f'{args.data_path}/train.csv')
     test_df = pd.read_csv(f'{args.data_path}/test.csv')
-
+    item_df = pd.read_csv(f'{args.data_path}/item.csv')
     user_col = 'uid' if 'uid' in test_df.columns else 'user_id'
+    candidate_items = set(item_df['iid'].astype(str).tolist())
+    train_seq_col = choose_seq_col(train_df, args.seq_col)
+    test_seq_col = choose_seq_col(test_df, args.seq_col)
 
-    # 从checkpoint获取物品映射
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    idx2iid = checkpoint.get('idx2iid', {})
-    iid2idx = checkpoint.get('iid2idx', {})
-    num_items = checkpoint['args'].get('num_items', len(idx2iid))
+    global_pop = build_global_popularity(train_df)
+    cooccur_stats = build_cooccur_stats(train_df, train_seq_col, recent_n=args.recent_n)
+    logging.info(
+        "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
+        "weights(model/pop/cooccur)=%.3f/%.3f/%.3f",
+        args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
+        args.model_weight, args.pop_weight, args.cooccur_weight,
+    )
+    logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
-    # 2. 加载模型
-    model, model_args = load_model_from_checkpoint(args.checkpoint, device)
-    model_type = model_args.get('model_type', 'gru4rec')
-    max_len = model_args.get('max_len', 50)
+    # 2. 可选加载模型。如果只跑热门/共现策略，可以不提供checkpoint。
+    model = None
+    model_type = ''
+    max_len = 50
+    idx2iid = {}
+    iid2idx = {}
+    num_items = len(candidate_items)
 
-    # 3. 确定序列列
-    seq_col = None
-    for col in ['item_seq_dedup', 'item_seq_raw', 'item_seq']:
-        if col in test_df.columns:
-            seq_col = col
-            break
+    if args.checkpoint:
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        idx2iid = checkpoint.get('idx2iid', {})
+        iid2idx = checkpoint.get('iid2idx', {})
+        num_items = checkpoint.get('args', {}).get('num_items', len(idx2iid) or len(candidate_items))
+        model, model_args = load_model_from_checkpoint(args.checkpoint, device)
+        model_type = model_args.get('model_type', 'gru4rec')
+        max_len = model_args.get('max_len', 50)
+    elif args.rec_strategy == 'model':
+        raise ValueError("rec_strategy=model 需要提供 --checkpoint；无checkpoint时请使用 history/popular/hybrid")
+    elif args.rec_strategy == 'hybrid' and args.model_weight > 0:
+        logging.warning("未提供checkpoint，hybrid策略将只融合热门度和历史共现")
 
-    # 4. 为每个用户构建序列并推理
-    logging.info(f"为每个用户生成Top-{args.topk}推荐...")
-    user_recommendations = {}
+    def get_model_scores(items):
+        """计算一个用户对全部候选item的模型分数，返回原始iid到分数的映射"""
+        if model is None:
+            return None
 
-    model.eval()
-    with torch.no_grad():
-        for user_id, group in test_df.groupby(user_col):
-            # 从序列列获取历史交互
-            if seq_col and pd.notna(group[seq_col].iloc[0]):
-                seq_str = str(group[seq_col].iloc[0])
-                items = [x.strip() for x in seq_str.split(',') if x.strip()]
-            else:
-                items = []
+        item_indices = [iid2idx.get(item, 0) for item in items]
+        seq = item_indices[-max_len:]
+        seq_len = len(seq)
+        seq = [0] * (max_len - seq_len) + seq
 
-            # 将字符串iid映射为整数索引
-            item_indices = [iid2idx.get(item, 0) for item in items]
+        item_seq = torch.LongTensor([seq]).to(device)
+        seq_len_t = torch.LongTensor([seq_len]).to(device)
 
-            # 构建序列(左填充)
-            seq = item_indices[-max_len:]  # 取最近的max_len个
-            seq_len = len(seq)
-            seq = [0] * (max_len - seq_len) + seq
-
-            item_seq = torch.LongTensor([seq]).to(device)
-            seq_len_t = torch.LongTensor([seq_len]).to(device)
-
-            # 获取序列表示
+        with torch.no_grad():
             if model_type == 'gru4rec':
                 seq_repr = model(item_seq, seq_len_t)
             else:
                 seq_repr = model(item_seq)
+            all_item_emb = model.item_embedding.weight[1:]
+            score_tensor = (seq_repr @ all_item_emb.T)[0].detach().cpu().numpy()
 
-            # 计算所有物品分数
-            all_item_emb = model.item_embedding.weight[1:]  # (num_items, embed_dim)
-            scores = seq_repr @ all_item_emb.T  # (1, num_items)
+        model_scores = {}
+        for zero_based_idx, score in enumerate(score_tensor):
+            model_idx = zero_based_idx + 1
+            iid = idx2iid.get(model_idx)
+            if iid is not None:
+                model_scores[str(iid)] = float(score)
+        return model_scores
 
-            # 排除历史物品（使用整数索引）
-            hist_indices = set(item_indices)
-            for idx in hist_indices:
-                if 1 <= idx <= num_items:
-                    scores[0, idx - 1] = -1e10
-
-            # 取Top-K
-            _, top_indices = torch.topk(scores[0], k=args.topk)
-            top_items = (top_indices + 1).cpu().numpy().tolist()
-
-            user_recommendations[user_id] = top_items
-
-    # 5. 构建输出DataFrame
-    # 提交格式: uid,prediction（逗号分隔的item id列表）
+    # 3. 为每个测试用户生成推荐。这里保持 test.csv 原始顺序，不再按uid排序。
+    logging.info(f"为每个用户生成Top-{args.topk}推荐...")
     result_rows = []
-    for user_id in sorted(user_recommendations.keys()):
-        recs = user_recommendations[user_id]
-        # 将整数索引映射回原始iid字符串
-        rec_strs = []
-        for r in recs:
-            iid_str = idx2iid.get(r, str(r))
-            rec_strs.append(iid_str)
+    for row_idx, row in test_df.iterrows():
+        user_id = str(row[user_col])
+        items = parse_seq(row.get(test_seq_col))
+        model_scores = get_model_scores(items) if args.rec_strategy in {'model', 'hybrid'} else None
+        recs = rank_items(
+            seq=items,
+            candidate_items=candidate_items,
+            global_pop=global_pop,
+            cooccur_stats=cooccur_stats,
+            topk=args.topk,
+            strategy=args.rec_strategy,
+            history_filter=args.history_filter,
+            recent_n=args.recent_n,
+            model_scores=model_scores,
+            model_weight=args.model_weight,
+            pop_weight=args.pop_weight,
+            cooccur_weight=args.cooccur_weight,
+        )
         result_rows.append({
             'uid': user_id,
-            'prediction': ','.join(rec_strs)
+            'prediction': ','.join(recs)
         })
 
+        if (row_idx + 1) % 1000 == 0:
+            logging.info(f"  已处理 {row_idx + 1} / {len(test_df)} 个用户")
+
+    # 4. 构建输出DataFrame
+    # 提交格式: uid,prediction（逗号分隔的item id列表）
     result_df = pd.DataFrame(result_rows)
 
-    # 6. 保存
+    # 5. 保存
     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)) if os.path.dirname(args.output_path) else '.', exist_ok=True)
     result_df.to_csv(args.output_path, index=False)
     logging.info(f"结果已保存: {args.output_path} ({len(result_df)} 用户)")

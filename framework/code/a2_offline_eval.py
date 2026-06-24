@@ -11,29 +11,19 @@ import json
 import math
 import os
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
+from rec_heuristics import (
+    build_cooccur_stats,
+    build_global_popularity,
+    choose_seq_col,
+    parse_seq,
+    rank_items,
+)
 
-def parse_seq(value) -> List[str]:
-    """解析逗号分隔的item序列"""
-    if pd.isna(value):
-        return []
-    return [item.strip() for item in str(value).split(",") if item.strip()]
-
-
-def choose_seq_col(df: pd.DataFrame, seq_col: str) -> str:
-    """确定使用哪个历史序列字段"""
-    if seq_col != "auto":
-        if seq_col not in df.columns:
-            raise ValueError(f"指定的序列列不存在: {seq_col}")
-        return seq_col
-    for col in ["item_seq_dedup", "item_seq_raw", "item_seq"]:
-        if col in df.columns:
-            return col
-    raise ValueError("找不到可用的历史序列列")
 
 
 def split_train_val(df: pd.DataFrame, val_ratio: float, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -44,97 +34,6 @@ def split_train_val(df: pd.DataFrame, val_ratio: float, seed: int) -> Tuple[pd.D
     val_idx = perm[:val_size]
     fit_idx = perm[val_size:]
     return df.iloc[fit_idx].reset_index(drop=True), df.iloc[val_idx].reset_index(drop=True)
-
-
-def build_global_popularity(fit_df: pd.DataFrame) -> Counter:
-    """统计全局target热门度"""
-    return Counter(fit_df["target_iid"].astype(str).tolist())
-
-
-def build_cooccur_stats(fit_df: pd.DataFrame, seq_col: str, recent_n: int) -> Dict[str, Counter]:
-    """统计历史item到target item的共现关系
-
-    例如某些训练样本中历史里出现过 i000832，且 target 是 i000481，
-    那么就给 cooccur["i000832"]["i000481"] 加一票。推理时如果测试用户
-    历史中也有 i000832，就可以优先推荐它常共同指向的 target。
-    """
-    stats: Dict[str, Counter] = defaultdict(Counter)
-    for _, row in fit_df.iterrows():
-        target = str(row["target_iid"])
-        seq = parse_seq(row.get(seq_col))
-        if recent_n > 0:
-            seq = seq[-recent_n:]
-        # 使用去重后的历史，避免同一行里重复item把共现票数放大太多。
-        for item in dict.fromkeys(seq):
-            stats[item][target] += 1
-    return stats
-
-
-def normalize_counter(counter: Counter) -> Dict[str, float]:
-    """把计数转成0到1之间的相对分数"""
-    if not counter:
-        return {}
-    max_count = max(counter.values())
-    if max_count <= 0:
-        return {}
-    return {item: count / max_count for item, count in counter.items()}
-
-
-def rank_items(
-    row: pd.Series,
-    seq_col: str,
-    candidate_items: set,
-    global_pop: Counter,
-    cooccur_stats: Dict[str, Counter],
-    topk: int,
-    strategy: str,
-    history_filter: str,
-    recent_n: int,
-) -> List[str]:
-    """为一条验证样本生成TopK推荐"""
-    seq = parse_seq(row.get(seq_col))
-    recent_seq = seq[-recent_n:] if recent_n > 0 else seq
-    history = set(seq)
-
-    scores: Dict[str, float] = defaultdict(float)
-    pop_scores = normalize_counter(global_pop)
-
-    if strategy in {"popular", "hybrid"}:
-        for item, score in pop_scores.items():
-            scores[item] += score
-
-    if strategy in {"last_item", "history", "hybrid"}:
-        history_items = recent_seq[-1:] if strategy == "last_item" else recent_seq
-        for hist_item in history_items:
-            for target, count in cooccur_stats.get(hist_item, {}).items():
-                scores[target] += math.log1p(count)
-
-    if not scores:
-        for item, score in pop_scores.items():
-            scores[item] += score
-
-    # 补全候选，避免某些短历史用户推荐不足TopK。
-    for item, score in pop_scores.items():
-        scores[item] += 1e-6 * score
-
-    if history_filter == "hard":
-        for item in history:
-            scores.pop(item, None)
-    elif history_filter == "soft":
-        for item in history:
-            if item in scores:
-                scores[item] *= 0.5
-    elif history_filter != "none":
-        raise ValueError(f"未知history_filter: {history_filter}")
-
-    ranked = [
-        item for item, _ in sorted(
-            scores.items(),
-            key=lambda kv: (-kv[1], kv[0]),
-        )
-        if item in candidate_items
-    ]
-    return ranked[:topk]
 
 
 def ndcg_at_k(preds: Sequence[str], target: str, k: int) -> float:
@@ -184,8 +83,7 @@ def evaluate_strategy(
     for _, row in val_df.iterrows():
         target = str(row["target_iid"])
         preds = rank_items(
-            row=row,
-            seq_col=seq_col,
+            seq=parse_seq(row.get(seq_col)),
             candidate_items=candidate_items,
             global_pop=global_pop,
             cooccur_stats=cooccur_stats,
@@ -289,7 +187,7 @@ def main():
 
     fit_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
     global_pop = build_global_popularity(fit_df)
-    cooccur_stats = build_cooccur_stats(fit_df, seq_col, args.recent_n)
+    cooccur_stats = build_cooccur_stats(fit_df, seq_col, recent_n=args.recent_n)
 
     print("=" * 80)
     print("A2离线评估")
