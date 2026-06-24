@@ -262,13 +262,17 @@ python3 code/validate_submission.py --zip_path output/exp002_history_none/predic
 
 线上指标：
 
-- 未提交线上。
+- 已提交 A 榜测试。
+- 推荐任务分数（A2）：`0.4548`
+- 相比 Exp-000 推荐任务分数 `0.2173`，提升 `+0.2375`。
+- 若 A1 仍沿用 baseline `0.3777`，估算总分约为 `(0.3777 + 0.4548) / 2 = 0.41625`。
 
 结论：
 
 - A2 正式推理链路已支持不依赖 checkpoint 的历史共现推荐。
-- 当前候选包只替换 A2，A1 沿用 baseline；如果提交线上，可直接观察 A2 改动收益。
+- 当前候选包只替换 A2，A1 沿用 baseline；线上反馈证明 A2 历史共现策略有效。
 - 离线结果强烈支持 `history_filter=none`，暂不建议继续使用硬过滤历史 item。
+- Exp-002 成为当前 A2 最优线上基线。
 
 是否保留：
 
@@ -276,5 +280,86 @@ python3 code/validate_submission.py --zip_path output/exp002_history_none/predic
 
 下一步：
 
-- 可选择将 `output/exp002_history_none/prediction.zip` 提交 A 榜验证 A2 线上收益。
-- 若线上提升，再继续做 `recent_n`、`seq_col`、`hybrid` 权重网格搜索。
+- 围绕 Exp-002 做小范围可解释搜索：优先比较 `recent_n`、`seq_col`、`last_item/history/hybrid`，每天只提交离线最有把握的 1-2 个候选。
+
+---
+
+## Exp-003 A2序列列与共现窗口搜索
+
+实验编号：Exp-003
+
+时间：2026-06-24
+
+目标：在 Exp-002 线上有效的基础上，搜索更优的历史序列来源和共现窗口，尽量只做低风险、可解释的 A2 参数优化。
+
+修改文件：
+
+- `framework/code/a2_grid_search.py`
+- `record.md`
+
+修改内容：
+
+- 新增 `a2_grid_search.py`，用于批量比较 `seq_col`、`recent_n`、`strategy` 和 `history_filter` 的离线指标。
+- 完整大网格运行较慢，实际本轮采用聚焦搜索：固定 `strategy=history`、`history_filter=none`，重点比较 `item_seq_dedup` 与 `item_seq_raw`、不同 `recent_n`。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 1 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 3 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 5 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 10 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 20 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 50 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_dedup --recent_n 0 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 1 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 3 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 5 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10
+python3 code/a2_offline_eval.py --data_path data/rec_data --val_ratio 0.2 --seed 42 --strategy history --history_filter none --seq_col item_seq_raw --recent_n 20 --topk 10
+
+python3 code/infer.py --task task2 --data_path data/rec_data --output_path output/exp003_raw_recent10/A2.csv --rec_strategy history --history_filter none --seq_col item_seq_raw --recent_n 10 --topk 10 --device cpu
+unzip -p output/baseline_submitted/prediction_20260623_182014_score_0.2975.zip A1.csv > output/exp003_raw_recent10/A1.csv
+zip -j output/exp003_raw_recent10/prediction.zip output/exp003_raw_recent10/A1.csv output/exp003_raw_recent10/A2.csv
+python3 code/validate_submission.py --zip_path output/exp003_raw_recent10/prediction.zip
+```
+
+本地指标：
+
+- `item_seq_dedup`：
+  - `recent_n=1`: `NDCG@10=0.505198`
+  - `recent_n=3`: `NDCG@10=0.535210`
+  - `recent_n=5`: `NDCG@10=0.534937`
+  - `recent_n=10`: `NDCG@10=0.530643`
+  - `recent_n=20`: `NDCG@10=0.527845`
+  - `recent_n=50`: `NDCG@10=0.523756`
+  - `recent_n=0`: `NDCG@10=0.520730`
+- `item_seq_raw`：
+  - `recent_n=1`: `NDCG@10=0.505198`
+  - `recent_n=3`: `NDCG@10=0.533586`
+  - `recent_n=5`: `NDCG@10=0.538631`
+  - `recent_n=10`: `NDCG@10=0.544448`
+  - `recent_n=20`: `NDCG@10=0.543116`
+- 当前离线最优：`item_seq_raw + recent_n=10 + history_filter=none + strategy=history`，`NDCG@10=0.544448`。
+- 新候选包 `output/exp003_raw_recent10/prediction.zip` 校验通过。
+- 与 Exp-002 的 A2 相比，Exp-003 有 `5914/10000` 行推荐发生变化。
+
+线上指标：
+
+- 未提交线上。
+
+结论：
+
+- raw 序列保留重复交互，比 dedup 序列更能表达近期强偏好。
+- 最优窗口从 Exp-002 的 `recent_n=20` 改为 `recent_n=10`，说明使用过长历史会引入噪声。
+- Exp-003 是当前下一次 A 榜提交的优先候选。
+
+是否保留：
+
+- 保留。
+
+下一步：
+
+- 若今日仍有提交次数，优先提交 `framework/output/exp003_raw_recent10/prediction.zip` 验证线上 A2。
+- 若线上继续提升，再围绕 `item_seq_raw + recent_n=10` 做轻量融合或 A1 提升。
