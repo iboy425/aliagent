@@ -1190,3 +1190,79 @@ rm -rf framework/output/exp012_smoke_a2_gru_ce
 
 - 保留。
 - 下一步在 GPU 上正式训练 A2 GRU4Rec/SASRec，并使用 `a2_model_hybrid_eval.py` 判断是否纳入提交包。
+
+---
+
+## Exp-012：A2 修复版 GRU4Rec 训练与 hybrid 融合验证
+
+日期：2026-06-25
+
+目标：
+
+- 在修复 A2 序列模型“取错最后状态”问题后，重新训练 GRU4Rec。
+- 检查模型分数是否能在当前最强启发式共现方案上继续带来增益。
+
+训练模型：
+
+- `output/exp012_a2_gru_fixed_ce/best_model.pt`
+- 模型：GRU4Rec
+- 损失：CE
+- 序列列：`item_seq_raw`
+- 历史过滤：`none`
+- GPU 训练，大 batch。
+
+融合验证命令：
+
+```bash
+cd /home/aliagent/framework
+
+CUDA_VISIBLE_DEVICES=0 python3 code/a2_model_hybrid_eval.py \
+  --data_path data/rec_data \
+  --checkpoint output/exp012_a2_gru_fixed_ce/best_model.pt \
+  --device cuda \
+  --batch_size 4096 \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --seq_col item_seq_raw \
+  --recent_ns 8,10,12,15,20 \
+  --model_weights 0,0.01,0.02,0.05,0.1,0.2,0.5 \
+  --user_weights 0,0.01,0.02,0.03,0.04 \
+  --model_topn 300 \
+  --output_json output/exp012_a2_gru_hybrid_eval/results.json
+```
+
+本地验证结果：
+
+- 最佳参数：
+  - `recent_n=10`
+  - `model_weight=0.5`
+  - `cooccur_weight=1.0`
+  - `user_weight=0.02`
+  - `pop_weight=1.0`
+  - `pop_penalty_weight=0.0`
+  - `NDCG@10=0.547844`
+- 同一验证集上纯启发式近似结果：
+  - `model_weight=0`
+  - `recent_n=10`
+  - `user_weight=0.02`
+  - `NDCG@10=0.547670`
+
+结论：
+
+- 修复后的 GRU4Rec 可以提供正向信号，但增益很小：
+  - `0.547844 - 0.547670 = +0.000174`
+- 该提升远小于 Exp-010 A1 Top-5 ensemble 的验证集提升。
+- SASRec 结果全为 0，暂不使用 SASRec 融合。
+- 如果今天只剩 2 次提交，下一次优先提交：
+  - A1：Exp-010 Top-5 ensemble
+  - A2：Exp-012 GRU hybrid 参数
+- 但需要认识到：本次提交的主要预期收益来自 A1，A2 hybrid 只作为小幅增益尝试。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留 GRU hybrid 作为下一次提交候选。
+- 不保留 SASRec。
