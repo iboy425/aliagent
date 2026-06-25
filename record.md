@@ -1266,3 +1266,54 @@ CUDA_VISIBLE_DEVICES=0 python3 code/a2_model_hybrid_eval.py \
 
 - 保留 GRU hybrid 作为下一次提交候选。
 - 不保留 SASRec。
+
+---
+
+## Tool-006：A2 hybrid 推理批量化
+
+日期：2026-06-25
+
+目标：
+
+- 让正式生成 A2.csv 时的模型分数计算方式与 `a2_model_hybrid_eval.py` 更一致。
+- 避免旧推理逻辑逐用户调用一次 GRU/SASRec，降低 Python 调度开销，提高 GPU 利用率。
+
+修改文件：
+
+- `framework/code/infer.py`
+
+修改内容：
+
+- 新增参数 `--model_topn`：
+  - A2 模型融合时，每个用户保留模型 Top-N 候选分数。
+  - 默认 `300`，与 Exp-012 离线融合验证保持一致。
+- `infer_task2_v2()` 中新增批量模型分数预计算：
+  - 先把全部测试用户序列按 batch 送入模型。
+  - 一次性计算 `seq_repr @ item_embedding.T`。
+  - 每个用户只保留模型 Top-N 分数，再交给 `rank_items()` 与共现、热门度、用户画像融合。
+
+原理说明：
+
+- 旧逻辑每个测试用户单独前向一次，GPU 每次只处理 1 条序列，利用率很低。
+- 新逻辑按 `--batch_size` 批量前向，例如一次处理 4096 条序列。
+- 这不会改变融合策略，只改变模型分数计算方式和保留候选数量。
+- 因为离线验证也使用 `model_topn=300`，正式推理默认同样使用 300，避免本地/提交口径不一致。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/infer.py framework/code/models.py framework/code/train.py framework/code/a2_model_hybrid_eval.py
+```
+
+验证结果：
+
+- 语法检查通过。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留。下一次生成 A2 hybrid 提交文件时使用。

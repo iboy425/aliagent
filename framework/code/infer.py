@@ -88,6 +88,8 @@ def parse_args():
                         help='A2共现召回使用最近多少个历史item')
     parser.add_argument('--model_weight', type=float, default=1.0,
                         help='A2模型分数融合权重')
+    parser.add_argument('--model_topn', type=int, default=300,
+                        help='A2模型融合时每个用户保留多少个模型候选分数')
     parser.add_argument('--pop_weight', type=float, default=1.0,
                         help='A2热门度分数融合权重')
     parser.add_argument('--cooccur_weight', type=float, default=1.0,
@@ -503,42 +505,64 @@ def infer_task2_v2(args):
     elif args.rec_strategy == 'hybrid' and args.model_weight > 0:
         logging.warning("未提供checkpoint，hybrid策略将只融合热门度和历史共现")
 
-    def get_model_scores(items):
-        """计算一个用户对全部候选item的模型分数，返回原始iid到分数的映射"""
-        if model is None:
-            return None
+    def precompute_model_scores():
+        """批量计算测试用户模型Top-N分数，减少逐用户GPU调用开销"""
+        if model is None or args.rec_strategy not in {'model', 'hybrid'}:
+            return [None] * len(test_df)
 
-        item_indices = [iid2idx.get(item, 0) for item in items]
-        seq = item_indices[-max_len:]
-        seq_len = len(seq)
-        seq = [0] * (max_len - seq_len) + seq
+        logging.info(
+            f"批量计算模型Top-{args.model_topn}分数: batch_size={args.batch_size}, max_len={max_len}"
+        )
+        seqs = []
+        lens = []
+        for _, row in test_df.iterrows():
+            items = parse_seq(row.get(test_seq_col))
+            item_indices = [iid2idx.get(item, 0) for item in items]
+            seq = item_indices[-max_len:]
+            seq_len = len(seq)
+            seq = [0] * (max_len - seq_len) + seq
+            seqs.append(seq)
+            lens.append(seq_len)
 
-        item_seq = torch.LongTensor([seq]).to(device)
-        seq_len_t = torch.LongTensor([seq_len]).to(device)
-
+        model_scores_by_row = []
+        model.eval()
         with torch.no_grad():
-            if model_type == 'gru4rec':
-                seq_repr = model(item_seq, seq_len_t)
-            else:
-                seq_repr = model(item_seq)
-            all_item_emb = model.item_embedding.weight[1:]
-            score_tensor = (seq_repr @ all_item_emb.T)[0].detach().cpu().numpy()
+            for start in range(0, len(seqs), args.batch_size):
+                end = min(start + args.batch_size, len(seqs))
+                item_seq = torch.LongTensor(seqs[start:end]).to(device)
+                seq_len_t = torch.LongTensor(lens[start:end]).to(device)
 
-        model_scores = {}
-        for zero_based_idx, score in enumerate(score_tensor):
-            model_idx = zero_based_idx + 1
-            iid = idx2iid.get(model_idx)
-            if iid is not None:
-                model_scores[str(iid)] = float(score)
-        return model_scores
+                if model_type == 'gru4rec':
+                    seq_repr = model(item_seq, seq_len_t)
+                else:
+                    seq_repr = model(item_seq)
+                all_item_emb = model.item_embedding.weight[1:]
+                scores = seq_repr @ all_item_emb.T
+                top_scores, top_indices = torch.topk(
+                    scores, k=min(args.model_topn, scores.size(1)), dim=1
+                )
+                top_scores = top_scores.detach().cpu().numpy()
+                top_indices = (top_indices.detach().cpu().numpy() + 1)
+
+                for row_indices, row_scores in zip(top_indices, top_scores):
+                    score_dict = {}
+                    for model_idx, score in zip(row_indices, row_scores):
+                        iid = idx2iid.get(int(model_idx))
+                        if iid is not None:
+                            score_dict[str(iid)] = float(score)
+                    model_scores_by_row.append(score_dict)
+
+                logging.info(f"  模型分数已处理 {end} / {len(seqs)}")
+        return model_scores_by_row
 
     # 3. 为每个测试用户生成推荐。这里保持 test.csv 原始顺序，不再按uid排序。
     logging.info(f"为每个用户生成Top-{args.topk}推荐...")
+    model_scores_by_row = precompute_model_scores()
     result_rows = []
     for row_idx, row in test_df.iterrows():
         user_id = str(row[user_col])
         items = parse_seq(row.get(test_seq_col))
-        model_scores = get_model_scores(items) if args.rec_strategy in {'model', 'hybrid'} else None
+        model_scores = model_scores_by_row[row_idx]
         user_counters = get_user_profile_counters(
             user_id=user_id,
             user_lookup=user_lookup,
