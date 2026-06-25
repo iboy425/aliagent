@@ -1563,6 +1563,35 @@ python3 framework/code/a1_correct_smooth.py \
   - `smooth_iter=5`
   - `smooth_weight=0.5`
 
+GPU 服务器 Top-5 ensemble 搜索结果：
+
+- 时间：2026-06-25
+- checkpoint：
+  - `output/exp010_a1_grid_c6_gcn_h384_l2_symmetric_none_seed777/best_model.pt`
+  - `output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777/best_model.pt`
+  - `output/exp010_a1_grid_c1_sage_h384_l2_symmetric_none_seed3407/best_model.pt`
+  - `output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed42/best_model.pt`
+  - `output/exp010_a1_grid_c7_sage_h256_l2_random_walk_none_seed777/best_model.pt`
+- 原始 Top-5 ensemble 验证准确率：`0.689498`
+- C&S 最佳验证准确率：`0.700457`
+- 本地固定验证集提升：`+0.010959`
+- 当前最佳参数：
+  - `correct_alpha=0.3`
+  - `correct_iter=5`
+  - `correct_weight=0.0`
+  - `smooth_alpha=0.7`
+  - `smooth_iter=10`
+  - `smooth_weight=1.0`
+
+补充结论：
+
+- C&S 在强 Top-5 ensemble 上仍然有效，说明 A1 还有后处理收益。
+- Top-20 中大量配置并列，且 `correct_weight` 影响很小，当前主要收益来自 Smooth 阶段。
+- 下一步不应立刻浪费线上提交次数，应先做：
+  - 多 split seed 稳健性验证。
+  - 围绕 `smooth_alpha=0.7`、`smooth_iter=10` 的细网格搜索。
+  - `random_walk` 与 `symmetric` 传播归一化对比。
+
 GPU 服务器下一步搜索命令：
 
 ```bash
