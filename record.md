@@ -1317,3 +1317,59 @@ python3 -m py_compile framework/code/infer.py framework/code/models.py framework
 是否保留：
 
 - 保留。下一次生成 A2 hybrid 提交文件时使用。
+
+---
+
+## Exp-013：A1 Top-5 ensemble + A2 GRU hybrid 线上提交
+
+日期：2026-06-25
+
+目标：
+
+- 使用 Exp-010 的 A1 Top-5 ensemble 替换 Exp-008 A1。
+- 使用 Exp-012 的 GRU hybrid 尝试提升 A2。
+
+提交配置：
+
+- A1：
+  - `output/exp010_a1_grid_c6_gcn_h384_l2_symmetric_none_seed777/best_model.pt`
+  - `output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777/best_model.pt`
+  - `output/exp010_a1_grid_c1_sage_h384_l2_symmetric_none_seed3407/best_model.pt`
+  - `output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed42/best_model.pt`
+  - `output/exp010_a1_grid_c7_sage_h256_l2_random_walk_none_seed777/best_model.pt`
+- A2：
+  - checkpoint：`output/exp012_a2_gru_fixed_ce/best_model.pt`
+  - `rec_strategy=hybrid`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `model_weight=0.5`
+  - `model_topn=300`
+  - `user_weight=0.02`
+
+线上指标：
+
+- 提交时间：2026-06-25 17:08:59
+- 总分：`0.5667`
+- 分类任务分数：`0.6790`
+- 推荐任务分数：`0.4545`
+
+结论：
+
+- A1 成功：
+  - Exp-008 A1：`0.6496`
+  - Exp-013 A1：`0.6790`
+  - 提升 `+0.0294`
+- A2 失败：
+  - Exp-008/Exp-010 前的启发式 A2：`0.4647`
+  - Exp-013 GRU hybrid A2：`0.4545`
+  - 下降 `-0.0102`
+- 总分仍提升：
+  - Exp-008 总分：`0.5571`
+  - Exp-013 总分：`0.5667`
+  - 提升 `+0.0096`
+- 下一次提交应保留 A1 Top-5 ensemble，同时把 A2 换回线上验证过的启发式 best。
+
+是否保留：
+
+- 保留 A1 Top-5。
+- 不保留 GRU hybrid 作为线上提交方案。
