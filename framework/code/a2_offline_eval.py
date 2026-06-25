@@ -22,6 +22,7 @@ from rec_heuristics import (
     build_user_profile_stats,
     choose_seq_col,
     get_user_profile_counters,
+    parse_item_counts,
     parse_seq,
     parse_user_profile_cols,
     rank_items,
@@ -83,6 +84,7 @@ def evaluate_strategy(
     user_cols: Sequence[str] = (),
     user_weight: float = 0.0,
     pop_penalty_weight: float = 0.0,
+    history_count_weight: float = 0.0,
 ) -> Dict:
     """评估一种推荐策略"""
     rows = []
@@ -107,7 +109,9 @@ def evaluate_strategy(
             history_filter=history_filter,
             recent_n=recent_n,
             user_profile_counters=user_counters,
+            history_counts=parse_item_counts(row.get("item_seq_counts")),
             user_weight=user_weight,
+            history_count_weight=history_count_weight,
             pop_penalty_weight=pop_penalty_weight,
         )
         seq_len = len(parse_seq(row.get(seq_col)))
@@ -131,6 +135,7 @@ def evaluate_strategy(
         "topk": topk,
         "user_weight": user_weight,
         "pop_penalty_weight": pop_penalty_weight,
+        "history_count_weight": history_count_weight,
         "samples": len(rows),
         "ndcg": avg(rows, "ndcg"),
         "hit": avg(rows, "hit"),
@@ -198,6 +203,7 @@ def parse_args():
         help="用户画像列，auto表示使用user.csv中除uid外全部列，空字符串表示关闭",
     )
     parser.add_argument("--pop_penalty_weight", type=float, default=0.0, help="热门item惩罚权重")
+    parser.add_argument("--history_count_weight", type=float, default=0.0, help="用户历史频次权重")
     parser.add_argument("--output_json", type=str, default="", help="指标JSON输出路径")
     return parser.parse_args()
 
@@ -245,6 +251,7 @@ def main():
     print(f"候选item: {len(candidate_items)} 个, target去重: {train_df['target_iid'].nunique()} 个")
     print(f"history_filter: {args.history_filter}, recent_n: {args.recent_n}")
     print(f"user_weight: {args.user_weight}, user_cols: {user_cols}, pop_penalty_weight: {args.pop_penalty_weight}")
+    print(f"history_count_weight: {args.history_count_weight}")
     print("-" * 80)
 
     strategies = ["popular", "last_item", "history", "hybrid"] if args.strategy == "all" else [args.strategy]
@@ -265,6 +272,7 @@ def main():
             user_cols=user_cols,
             user_weight=args.user_weight,
             pop_penalty_weight=args.pop_penalty_weight,
+            history_count_weight=args.history_count_weight,
         )
         all_metrics.append(metrics)
         print_metrics(metrics)

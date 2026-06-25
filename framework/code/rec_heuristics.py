@@ -24,6 +24,27 @@ def parse_seq(value) -> List[str]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+def parse_item_counts(value) -> Counter:
+    """解析 item_seq_counts 字段
+
+    字段格式类似 `i000909:47,i002063:17`。返回 Counter 后可以
+    直接作为用户历史高频item信号，用于重复购买/复购类推荐。
+    """
+    counter = Counter()
+    if pd.isna(value):
+        return counter
+    for part in str(value).split(","):
+        if ":" not in part:
+            continue
+        item, count = part.split(":", 1)
+        item = item.strip()
+        try:
+            counter[item] += int(float(count))
+        except ValueError:
+            continue
+    return counter
+
+
 def choose_seq_col(df: pd.DataFrame, seq_col: str = "auto") -> str:
     """确定使用哪个历史序列字段"""
     if seq_col != "auto":
@@ -220,6 +241,18 @@ def _add_user_profile_scores(
             scores[item] = scores.get(item, 0.0) + per_counter_weight * score
 
 
+def _add_history_count_scores(
+    scores: Dict[str, float],
+    history_counts: Optional[Counter],
+    weight: float,
+):
+    """加入当前用户历史item频次分数"""
+    if not history_counts or weight <= 0:
+        return
+    for item, score in normalize_counter(history_counts).items():
+        scores[item] = scores.get(item, 0.0) + weight * score
+
+
 def _apply_popularity_penalty(
     scores: Dict[str, float],
     global_pop: Counter,
@@ -265,10 +298,12 @@ def rank_items(
     recent_n: int = 20,
     model_scores: Optional[Mapping[str, float]] = None,
     user_profile_counters: Optional[Sequence[Counter]] = None,
+    history_counts: Optional[Counter] = None,
     model_weight: float = 1.0,
     pop_weight: float = 1.0,
     cooccur_weight: float = 1.0,
     user_weight: float = 0.0,
+    history_count_weight: float = 0.0,
     pop_penalty_weight: float = 0.0,
     history_soft_factor: float = 0.5,
 ) -> List[str]:
@@ -311,6 +346,7 @@ def rank_items(
         _add_cooccur_scores(scores, history_items, cooccur_stats, cooccur_weight)
 
     _add_user_profile_scores(scores, user_profile_counters, user_weight)
+    _add_history_count_scores(scores, history_counts, history_count_weight)
 
     # 空历史或冷启动时，任何策略都用热门target兜底。
     if not scores:

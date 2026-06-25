@@ -35,6 +35,7 @@ from rec_heuristics import (
     build_user_profile_stats,
     choose_seq_col,
     get_user_profile_counters,
+    parse_item_counts,
     parse_seq,
     parse_user_profile_cols,
     rank_items,
@@ -96,6 +97,8 @@ def parse_args():
                         help='A2历史共现分数融合权重')
     parser.add_argument('--user_weight', type=float, default=0.0,
                         help='A2用户画像分组热门度融合权重')
+    parser.add_argument('--history_count_weight', type=float, default=0.0,
+                        help='A2当前用户历史item频次融合权重')
     parser.add_argument('--user_profile_cols', type=str, default='auto',
                         help='A2用户画像列，auto表示使用user.csv中除uid外全部列，空字符串表示关闭')
     parser.add_argument('--pop_penalty_weight', type=float, default=0.0,
@@ -477,10 +480,11 @@ def infer_task2_v2(args):
 
     logging.info(
         "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
-        "weights(model/pop/cooccur/user)=%.3f/%.3f/%.3f/%.3f, pop_penalty=%.3f",
+        "weights(model/pop/cooccur/user/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f, "
+        "pop_penalty=%.3f",
         args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
         args.model_weight, args.pop_weight, args.cooccur_weight, args.user_weight,
-        args.pop_penalty_weight,
+        args.history_count_weight, args.pop_penalty_weight,
     )
     logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
@@ -580,10 +584,12 @@ def infer_task2_v2(args):
             recent_n=args.recent_n,
             model_scores=model_scores,
             user_profile_counters=user_counters,
+            history_counts=parse_item_counts(row.get('item_seq_counts')),
             model_weight=args.model_weight,
             pop_weight=args.pop_weight,
             cooccur_weight=args.cooccur_weight,
             user_weight=args.user_weight,
+            history_count_weight=args.history_count_weight,
             pop_penalty_weight=args.pop_penalty_weight,
         )
         result_rows.append({

@@ -1373,3 +1373,108 @@ python3 -m py_compile framework/code/infer.py framework/code/models.py framework
 
 - 保留 A1 Top-5。
 - 不保留 GRU hybrid 作为线上提交方案。
+
+---
+
+## Exp-015：A2 历史频次信号与无效支线清理
+
+日期：2026-06-25
+
+目标：
+
+- 不再保留线上已经验证下降的 GRU hybrid 提交路径。
+- 不保留未验证出收益的 item feature 试验代码。
+- 只新增一个可解释、低风险的 A2 信号：`item_seq_counts` 用户历史频次。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+  - 新增 `parse_item_counts()`，解析 `item_seq_counts` 中的 `item:count`。
+  - 新增历史频次加分逻辑，把用户长期高频 item 作为额外推荐信号。
+  - `rank_items()` 新增 `history_counts` 和 `history_count_weight` 参数。
+- `framework/code/a2_offline_eval.py`
+  - 离线评估支持 `--history_count_weight`。
+  - 每条验证样本从 `item_seq_counts` 解析当前用户历史频次并传入排序函数。
+- `framework/code/a2_grid_search.py`
+  - 网格搜索支持 `--history_count_weights`。
+- `framework/code/infer.py`
+  - 正式 A2 推理支持 `--history_count_weight`。
+  - 生成提交时和离线评估使用同一套 `rank_items()` 逻辑。
+- `framework/code/a2_model_hybrid_eval.py`
+  - 删除。该脚本服务 GRU hybrid 离线融合，但 Exp-013 线上 A2 从 `0.4647` 降到 `0.4545`，不再作为保留路径。
+
+原理说明：
+
+- `item_seq_raw` 代表用户最近的行为顺序，适合做“最近兴趣”的共现召回。
+- `item_seq_counts` 代表用户历史里各 item 出现次数，适合做“长期偏好/复购倾向”的加分。
+- 旧启发式主要看最近 10 个历史 item 的共现，可能忽略用户反复购买但不在最近窗口里的 item。
+- 新逻辑不是替换原策略，而是在原共现分和用户画像分之外，加一个受 `history_count_weight` 控制的频次分。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/rec_heuristics.py framework/code/a2_grid_search.py framework/code/a2_offline_eval.py framework/code/infer.py framework/code/train.py framework/code/models.py
+
+rg -n "a2_model_hybrid_eval|item_feature" framework/code
+
+python3 framework/code/a2_offline_eval.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --strategy history \
+  --history_filter none \
+  --seq_col item_seq_raw \
+  --recent_n 10 \
+  --user_weight 0.02 \
+  --history_count_weight 0.0 \
+  --output_json framework/output/exp015_a2_history_count_control/metrics.json
+
+python3 framework/code/a2_offline_eval.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --strategy history \
+  --history_filter none \
+  --seq_col item_seq_raw \
+  --recent_n 10 \
+  --user_weight 0.02 \
+  --history_count_weight 0.4 \
+  --output_json framework/output/exp015_a2_history_count_single/metrics.json
+```
+
+验证结果：
+
+- 语法检查：通过。
+- 残留引用检查：`framework/code` 下没有 `a2_model_hybrid_eval` 或 `item_feature` 残留。
+- A2 对照配置：
+  - `history_count_weight=0.0`
+  - `NDCG@10=0.548205`
+  - `Hit@10=0.786250`
+  - `MRR=0.473521`
+- A2 新配置：
+  - `history_count_weight=0.4`
+  - `NDCG@10=0.550125`
+  - `Hit@10=0.788000`
+  - `MRR=0.475525`
+- 离线提升：
+  - `NDCG@10 +0.001920`
+  - `Hit@10 +0.001750`
+  - `MRR +0.002004`
+
+线上指标：
+
+- 尚未提交。
+
+结论：
+
+- 保留 `history_count_weight`，作为下一次 A2 提交候选。
+- 下一次提交建议使用：
+  - A1：Exp-010 Top-5 ensemble。
+  - A2：`rec_strategy=history, seq_col=item_seq_raw, recent_n=10, user_weight=0.02, history_count_weight=0.4`。
+
+是否保留：
+
+- 保留。
