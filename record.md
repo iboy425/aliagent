@@ -638,3 +638,71 @@ rm -rf framework/output/exp007_smoke_a1_ensemble
 是否保留：
 
 - 保留。下一轮 GPU 实验将使用该功能做 A1 多 seed 集成。
+
+---
+
+## Tool-002：固定 A1 验证集划分并增加 ensemble 验证工具
+
+日期：2026-06-25
+
+背景：
+
+- GPU 上已完成第一轮 A1 多 seed 训练：
+  - seed=42：最优验证准确率 `0.6502`
+  - seed=2024：最优验证准确率 `0.6575`
+  - seed=3407：最优验证准确率 `0.6639`
+  - seed=777：最优验证准确率 `0.6493`
+  - seed=2026：最优验证准确率 `0.6749`
+- 这些结果说明 A1 仍有提升空间，单模型已经高于 Exp-006 的 `0.632877`。
+
+发现的问题：
+
+- 当前 `--seed` 同时控制模型初始化、Dropout随机性、训练/验证集划分。
+- 因此不同 seed 的 `val_acc` 不是在同一份验证集上评估，不能严格按数值直接排序。
+- 如果直接用这组日志决定 Top-3/Top-5 ensemble，存在验证集口径不一致的问题。
+
+修改文件：
+
+- `framework/code/train.py`
+- `framework/code/a1_ensemble_eval.py`
+
+修改内容：
+
+- `train.py` 新增 `--split_seed`：
+  - 默认 `None`，保持旧行为：不传时仍沿用 `--seed`。
+  - 传入后，Task 1 的训练/验证集划分固定使用 `--split_seed`。
+  - 模型初始化和训练随机性仍由 `--seed` 控制。
+- 新增 `a1_ensemble_eval.py`：
+  - 输入多个 A1 checkpoint。
+  - 在指定 `--split_seed` 的固定验证集上重新评估单模型准确率。
+  - 按单模型验证准确率排序后评估 Top-1 / Top-3 / Top-5 等 logits 平均 ensemble。
+  - 输出 JSON 和 CSV，方便记录与复盘。
+
+原理说明：
+
+- 科学实验里，比较模型必须尽量保证“考试卷一致”。
+- `seed=42` 和 `seed=2026` 如果对应不同验证集，`0.6502` 和 `0.6749` 的差异可能同时包含：
+  - 模型初始化差异；
+  - 训练过程随机性差异；
+  - 验证集难度差异。
+- 增加 `--split_seed` 后，可以固定验证集，只改变模型 seed。
+- 这样得到的多个 checkpoint 更适合做 ensemble 对比，也更适合判断线上提交候选。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/train.py framework/code/a1_ensemble_eval.py framework/code/infer.py
+```
+
+验证结果：
+
+- 语法检查通过。
+
+线上指标：
+
+- 尚未提交。该记录是实验方法修正。
+
+是否保留：
+
+- 保留。后续 A1 GPU 实验统一使用 `--split_seed 42`，只改变 `--seed`。

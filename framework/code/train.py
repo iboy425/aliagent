@@ -108,6 +108,8 @@ def parse_args():
     # 其他
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
+    parser.add_argument('--split_seed', type=int, default=None,
+                        help='Task1训练/验证划分随机种子；默认沿用 --seed')
     parser.add_argument('--device', type=str, default=None,
                         help='计算设备,如 cuda:0 或 cpu')
     parser.add_argument('--log_interval', type=int, default=10,
@@ -152,13 +154,15 @@ def train_task1(args):
     logging.info(f"节点数: {num_nodes}, 特征维度: {num_features}, 类别数: {num_classes}")
 
     # 2. 划分训练/验证集
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    logging.info(f"验证集划分随机种子: {split_seed}")
     if args.stratified_split:
         train_idx, val_idx = stratified_split(
-            data['labels'], data['train_idx'], args.val_ratio, args.seed
+            data['labels'], data['train_idx'], args.val_ratio, split_seed
         )
     else:
         train_idx, val_idx = split_train_val(
-            data['train_idx'], args.val_ratio, args.seed
+            data['train_idx'], args.val_ratio, split_seed
         )
     logging.info(f"训练集: {len(train_idx)}, 验证集: {len(val_idx)}, 测试集: {len(data['test_idx'])}")
 
