@@ -224,12 +224,10 @@ class GRU4Rec(nn.Module):
         output, _ = self.gru(x)  # (batch, seq_len, hidden_dim)
         output = self.layer_norm(output)
 
-        # 取最后一个有效位置
-        if seq_len is not None:
-            idx = seq_len.clamp(min=1) - 1
-            last = output[torch.arange(output.size(0)), idx]
-        else:
-            last = output[:, -1, :]
+        # 数据预处理采用左侧padding，真实历史序列位于右侧。
+        # 因此最后一个时间步就是最后一个真实交互；不能用 seq_len-1，
+        # 否则短序列会取到左侧padding位置，导致模型学到错误表示。
+        last = output[:, -1, :]
 
         return self.output_projection(last)  # (batch, embedding_dim)
 
@@ -319,9 +317,9 @@ class SASRec(nn.Module):
             src_key_padding_mask=padding_mask
         )  # (batch, seq_len, embedding_dim)
 
-        # 取最后一个有效位置
-        seq_lengths = (item_seq != 0).sum(dim=1).clamp(min=1) - 1  # (batch,)
-        last_output = output[torch.arange(batch_size), seq_lengths]  # (batch, embedding_dim)
+        # 数据预处理采用左侧padding，真实历史序列位于右侧。
+        # 最后一个时间步对应最近一次交互，是下一跳推荐最需要的状态。
+        last_output = output[:, -1, :]  # (batch, embedding_dim)
 
         return last_output
 

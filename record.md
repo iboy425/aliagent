@@ -1097,3 +1097,96 @@ ensemble 结果：
 是否保留：
 
 - 保留 Top-5 A1 ensemble 作为下一次优先提交候选。
+
+---
+
+## Tool-005：修复 A2 序列模型取错位置并增强 GPU 训练吞吐
+
+日期：2026-06-25
+
+背景：
+
+- 当前线上 A2 最优仍为 `0.4647`，距离第一名 A2 `0.50967` 有明显差距。
+- 之前官方 SASRec 配置训练 5 轮左右，本地验证 NDCG 只有约 `0.24`，明显低于启发式共现方案。
+- 用户反馈 GPU 使用率偏低，希望在仅剩少量提交次数前提高 A2 训练质量和 GPU 利用率。
+
+发现的问题：
+
+- `load_rec_data()` 对序列采用左侧 padding：
+  - `[0, 0, 0, item_a, item_b, item_c]`
+  - 最新交互在最右侧。
+- 旧版 `GRU4Rec.forward()` 使用 `seq_len - 1` 取最后有效位置。
+- 旧版 `SASRec.forward()` 也使用 `(item_seq != 0).sum() - 1` 取输出位置。
+- 这对左侧 padding 是错误的：短序列会取到左侧 padding 区域，而不是最右侧真实交互。
+- 结果是模型经常用“空白位置表示”做推荐，训练目标与真实序列状态错位。
+
+修改文件：
+
+- `framework/code/models.py`
+- `framework/code/train.py`
+- `framework/code/a2_model_hybrid_eval.py`
+
+修改内容：
+
+- `models.py`：
+  - 修复 `GRU4Rec.forward()`：统一取 `output[:, -1, :]`。
+  - 修复 `SASRec.forward()`：统一取 `output[:, -1, :]`。
+  - 原因：当前数据是左侧 padding，最后一个时间步就是最近一次真实交互。
+- `train.py`：
+  - 新增 `--num_workers`。
+  - A2 DataLoader 支持 `pin_memory=True`、`persistent_workers=True`。
+  - GPU 训练时 Tensor 拷贝使用 `non_blocking=True`。
+  - 目标是减少 CPU 数据加载和拷贝造成的 GPU 等待。
+- `a2_model_hybrid_eval.py`：
+  - 新增 A2 模型+启发式融合离线评估脚本。
+  - 批量计算验证集模型 Top-N 分数。
+  - 搜索 `model_weight`、`recent_n`、`user_weight` 等融合参数。
+  - 只有离线超过当前启发式基线，才建议消耗线上提交次数。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/models.py framework/code/train.py framework/code/a2_model_hybrid_eval.py framework/code/infer.py
+
+python3 framework/code/train.py \
+  --task task2 \
+  --data_path framework/data/rec_data \
+  --output_dir framework/output/exp012_smoke_a2_gru_ce \
+  --epochs 1 \
+  --model_type gru4rec \
+  --embedding_dim 32 \
+  --hidden_dim 64 \
+  --num_layers 1 \
+  --max_len 50 \
+  --batch_size 1024 \
+  --loss_type ce \
+  --seq_col item_seq_raw \
+  --eval_history_filter none \
+  --lr 0.001 \
+  --dropout 0.2 \
+  --weight_decay 0.00001 \
+  --patience 1 \
+  --device cpu \
+  --num_workers 0 \
+  --log_interval 1
+rm -rf framework/output/exp012_smoke_a2_gru_ce
+```
+
+验证结果：
+
+- 语法检查通过。
+- 修复后 GRU4Rec CE 仅 1 epoch 烟测：
+  - `Val NDCG@10=0.3115`
+  - `Hit@10=0.5112`
+  - `MRR=0.2489`
+- 相比此前 SASRec 多轮仍约 `0.24` 的结果，说明“取错序列位置”确实是 A2 模型训练失败的重要原因。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留。
+- 下一步在 GPU 上正式训练 A2 GRU4Rec/SASRec，并使用 `a2_model_hybrid_eval.py` 判断是否纳入提交包。

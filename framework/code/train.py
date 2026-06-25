@@ -84,6 +84,8 @@ def parse_args():
                         help='权重衰减(L2正则化)')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='批次大小')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='DataLoader工作进程数，A2训练可适当调大以提高GPU利用率')
     parser.add_argument('--patience', type=int, default=20,
                         help='早停容忍轮数')
 
@@ -390,11 +392,22 @@ def train_task2(args):
     # 验证集不使用负采样
     val_dataset = RecDataset(val_seqs, val_targets, val_lens)
 
+    pin_memory = device.type == 'cuda'
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=args.num_workers > 0,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=args.num_workers > 0,
     )
 
     # 4. 创建模型
@@ -449,10 +462,10 @@ def train_task2(args):
         for batch in train_loader:
             if args.loss_type == 'bpr':
                 item_seqs, targets, neg_items, seq_lens = batch
-                item_seqs = item_seqs.to(device)
-                targets = targets.to(device)
-                neg_items = neg_items.to(device)
-                seq_lens = seq_lens.to(device)
+                item_seqs = item_seqs.to(device, non_blocking=pin_memory)
+                targets = targets.to(device, non_blocking=pin_memory)
+                neg_items = neg_items.to(device, non_blocking=pin_memory)
+                seq_lens = seq_lens.to(device, non_blocking=pin_memory)
 
                 optimizer.zero_grad()
 
@@ -476,9 +489,9 @@ def train_task2(args):
 
             else:  # CE损失
                 item_seqs, targets, seq_lens = batch
-                item_seqs = item_seqs.to(device)
-                targets = targets.to(device)
-                seq_lens = seq_lens.to(device)
+                item_seqs = item_seqs.to(device, non_blocking=pin_memory)
+                targets = targets.to(device, non_blocking=pin_memory)
+                seq_lens = seq_lens.to(device, non_blocking=pin_memory)
 
                 optimizer.zero_grad()
 
@@ -512,8 +525,9 @@ def train_task2(args):
         with torch.no_grad():
             for batch in val_loader:
                 item_seqs, targets, seq_lens = batch
-                item_seqs = item_seqs.to(device)
-                seq_lens = seq_lens.to(device)
+                item_seqs = item_seqs.to(device, non_blocking=pin_memory)
+                targets = targets.to(device, non_blocking=pin_memory)
+                seq_lens = seq_lens.to(device, non_blocking=pin_memory)
 
                 # 获取序列表示
                 if args.model_type == 'gru4rec':
@@ -542,7 +556,7 @@ def train_task2(args):
                 top_indices = (top_indices + 1).cpu().numpy()  # 转回原始ID
 
                 val_predictions.extend(top_indices.tolist())
-                val_targets_list.extend(targets.numpy().tolist())
+                val_targets_list.extend(targets.cpu().numpy().tolist())
 
         # 计算验证指标
         val_ndcg = compute_ndcg(val_predictions, val_targets_list, k=10)
