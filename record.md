@@ -1609,6 +1609,34 @@ GPU 服务器 Top-5 ensemble 搜索结果：
   - C&S 在该可信 holdout 上从 `0.689498` 提升到 `0.700457`，这个 `+0.010959` 仍可作为有效信号。
   - 若要做真正多 split 验证，必须为每个 split 重新训练对应 checkpoint，不能复用只在 `split_seed=42` 下训练筛选出的模型。
 
+细网格搜索结果：
+
+- `random_walk` 归一化：
+  - 原始验证准确率：`0.689498`
+  - 最佳 C&S 验证准确率：`0.700457`
+  - 最佳参数：
+    - `correct_alpha=0.3`
+    - `correct_iter=5`
+    - `correct_weight=0.0`
+    - `smooth_alpha=0.7`
+    - `smooth_iter=7`
+    - `smooth_weight=1.0`
+  - 多个 `smooth_iter=7/10/12/15/20` 并列，说明该区域是稳定平台。
+- `symmetric` 归一化：
+  - 原始验证准确率：`0.689498`
+  - 最佳 C&S 验证准确率：`0.699543`
+  - 最佳参数：
+    - `correct_alpha=0.3`
+    - `correct_iter=5`
+    - `correct_weight=0.0`
+    - `smooth_alpha=0.6`
+    - `smooth_iter=5`
+    - `smooth_weight=1.0`
+- 结论：
+  - `random_walk` 比 `symmetric` 高 `+0.000914`。
+  - 继续细搜没有突破 `0.700457`，当前 A1 C&S 参数可收敛为 `random_walk + smooth_alpha=0.7 + smooth_iter=7/10 + smooth_weight=1.0`。
+  - 因为 `correct_weight=0.0`，当前实际有效方法是训练标签锚点平滑，不是残差纠错。
+
 GPU 服务器下一步搜索命令：
 
 ```bash
