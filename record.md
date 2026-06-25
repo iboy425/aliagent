@@ -951,3 +951,87 @@ Top 结果摘要：
 
 - 保留搜索结果和工具。
 - 暂不把 Exp-009 作为优先提交方案。
+
+---
+
+## Tool-004：A1 GCN 稀疏邻接训练加速
+
+日期：2026-06-25
+
+背景：
+
+- Exp-010 A1 结构搜索已经显示 GCN 明显强于当前 SAGE：
+  - `gcn hidden=384 seed=777` 固定验证集 `val_acc=0.677626`
+  - `gcn hidden=256 seed=777` 固定验证集 `val_acc=0.674886`
+  - Exp-008 Top-2 ensemble 固定验证集为 `0.659361`
+- GPU 监控显示 GPU 使用率约 `11%`，说明当前训练不是算力吃满，而是存在数据结构/调度瓶颈。
+
+发现的问题：
+
+- 原始 `normalize_adj()` 会把 scipy 稀疏邻接矩阵转成 dense Tensor。
+- A1 图有 13,752 个节点，dense 邻接矩阵约为 `13752 x 13752`。
+- 图本身是稀疏结构，dense 矩阵乘法会做大量无效零元素计算，并占用不必要显存。
+- 当前最优方向是 GCN，而 GCN 层只需要 `adj @ x`，天然适合稀疏邻接矩阵。
+
+修改文件：
+
+- `framework/code/utils.py`
+- `framework/code/train.py`
+- `framework/code/infer.py`
+
+修改内容：
+
+- `utils.py`：
+  - 新增 `normalize_adj_sparse()`：稀疏对称归一化 `D^-1/2 (A+I) D^-1/2`。
+  - 新增 `random_walk_normalize_sparse()`：稀疏随机游走归一化。
+- `train.py`：
+  - 新增参数 `--adj_format dense|sparse`。
+  - 当 `--model_type gcn --adj_format sparse` 时，使用稀疏邻接训练。
+  - 非 GCN 模型传入 `sparse` 时自动回退 dense，避免 GraphSAGE degree 逻辑产生兼容问题。
+- `infer.py`：
+  - 推理时读取 checkpoint 中保存的 `adj_format`。
+  - 稀疏训练的 GCN checkpoint 会自动使用稀疏邻接推理。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/utils.py framework/code/train.py framework/code/infer.py framework/code/a1_ensemble_eval.py
+
+python3 framework/code/train.py \
+  --task task1 \
+  --data_path framework/data/cls_data/A1.npz \
+  --output_dir framework/output/exp011_smoke_sparse_gcn \
+  --epochs 1 \
+  --model_type gcn \
+  --hidden_dim 32 \
+  --num_layers 2 \
+  --lr 0.005 \
+  --dropout 0.5 \
+  --weight_decay 0.0005 \
+  --patience 1 \
+  --normalize symmetric \
+  --adj_format sparse \
+  --feature_norm none \
+  --class_weight none \
+  --stratified_split \
+  --split_seed 42 \
+  --device cpu \
+  --seed 42 \
+  --log_interval 1
+rm -rf framework/output/exp011_smoke_sparse_gcn
+```
+
+验证结果：
+
+- 语法检查通过。
+- 1 epoch 稀疏 GCN 烟测通过。
+- 日志显示 `邻接矩阵格式: sparse`，训练前向/反向可运行。
+
+线上指标：
+
+- 尚未提交。该记录是速度优化工具改造。
+
+是否保留：
+
+- 保留。后续 GCN 搜索统一优先使用 `--adj_format sparse`。

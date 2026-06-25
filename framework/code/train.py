@@ -36,7 +36,8 @@ from torch.utils.data import DataLoader
 from models import GNNClassifier, GRU4Rec, SASRec
 from datasets import GraphDataset, RecDataset, NegativeSamplingDataset, load_rec_data
 from utils import (
-    normalize_adj, random_walk_normalize, sparse_to_torch,
+    normalize_adj, normalize_adj_sparse,
+    random_walk_normalize, random_walk_normalize_sparse, sparse_to_torch,
     preprocess_features, drop_edge_adj, feature_mask_tensor,
     split_train_val, stratified_split, set_seed, get_device,
     compute_accuracy, compute_ndcg, compute_hit_rate, compute_mrr,
@@ -92,6 +93,9 @@ def parse_args():
     parser.add_argument('--normalize', type=str, default='symmetric',
                         choices=['symmetric', 'random_walk', 'none'],
                         help='邻接矩阵归一化方式')
+    parser.add_argument('--adj_format', type=str, default='dense',
+                        choices=['dense', 'sparse'],
+                        help='Task1邻接矩阵格式；GCN可用sparse减少无效计算')
     parser.add_argument('--feature_norm', type=str, default='none',
                         choices=['none', 'row', 'l2'],
                         help='节点特征归一化方式')
@@ -185,16 +189,22 @@ def train_task1(args):
     else:
         features = torch.FloatTensor(features_raw).to(device)
 
-    # 邻接矩阵归一化
+    # 邻接矩阵归一化。GCN只需要 `adj @ x`，可以安全使用稀疏tensor；
+    # GraphSAGE当前实现还会计算degree，保守起见默认继续使用dense格式。
+    use_sparse_adj = args.adj_format == 'sparse' and args.model_type == 'gcn'
+    if args.adj_format == 'sparse' and args.model_type != 'gcn':
+        logging.warning("当前仅对GCN启用稀疏邻接矩阵；非GCN模型自动回退dense格式")
+
     if args.normalize == 'symmetric':
-        adj = normalize_adj(adj_raw).to(device)
+        adj = normalize_adj_sparse(adj_raw, device=device) if use_sparse_adj else normalize_adj(adj_raw).to(device)
     elif args.normalize == 'random_walk':
-        adj = random_walk_normalize(adj_raw).to(device)
+        adj = random_walk_normalize_sparse(adj_raw, device=device) if use_sparse_adj else random_walk_normalize(adj_raw).to(device)
     else:
         if sp.issparse(adj_raw):
-            adj = sparse_to_torch(adj_raw, device=device)
+            adj = sparse_to_torch(adj_raw, device=device, return_sparse=use_sparse_adj)
         else:
             adj = torch.FloatTensor(adj_raw).to(device)
+    logging.info(f"邻接矩阵格式: {'sparse' if use_sparse_adj else 'dense'}")
 
     # 标签转tensor
     labels = torch.LongTensor(data['labels']).to(device)

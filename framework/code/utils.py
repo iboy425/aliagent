@@ -58,6 +58,27 @@ def normalize_adj(adj):
     return D_inv_sqrt @ adj_hat @ D_inv_sqrt
 
 
+def normalize_adj_sparse(adj, device='cpu'):
+    """稀疏对称归一化邻接矩阵
+
+    与 `normalize_adj()` 数学含义一致，但保留稀疏存储，适合GCN。
+    当前A1图节点数不算极大，但边矩阵非常稀疏；保留稀疏形式可以减少
+    dense `N x N` 矩阵带来的显存和无效乘法开销。
+    """
+    if not sp.issparse(adj):
+        return normalize_adj(adj).to(device)
+
+    adj = adj.tocsr().astype(np.float32)
+    adj_hat = adj + sp.eye(adj.shape[0], dtype=np.float32, format='csr')
+    degree = np.asarray(adj_hat.sum(axis=1)).reshape(-1)
+    inv_sqrt = np.zeros_like(degree, dtype=np.float32)
+    nonzero = degree > 0
+    inv_sqrt[nonzero] = np.power(degree[nonzero], -0.5)
+    d_mat = sp.diags(inv_sqrt)
+    norm_adj = d_mat.dot(adj_hat).dot(d_mat).tocsr()
+    return sparse_to_torch(norm_adj, device=device, return_sparse=True).coalesce()
+
+
 def random_walk_normalize(adj):
     """随机游走归一化: D^(-1) * (A + I)
 
@@ -75,6 +96,21 @@ def random_walk_normalize(adj):
     D_inv[torch.isinf(D_inv)] = 0
     D_inv = torch.diag(D_inv)
     return D_inv @ adj_hat
+
+
+def random_walk_normalize_sparse(adj, device='cpu'):
+    """稀疏随机游走归一化邻接矩阵"""
+    if not sp.issparse(adj):
+        return random_walk_normalize(adj).to(device)
+
+    adj = adj.tocsr().astype(np.float32)
+    adj_hat = adj + sp.eye(adj.shape[0], dtype=np.float32, format='csr')
+    degree = np.asarray(adj_hat.sum(axis=1)).reshape(-1)
+    inv = np.zeros_like(degree, dtype=np.float32)
+    nonzero = degree > 0
+    inv[nonzero] = 1.0 / degree[nonzero]
+    norm_adj = sp.diags(inv).dot(adj_hat).tocsr()
+    return sparse_to_torch(norm_adj, device=device, return_sparse=True).coalesce()
 
 
 def sparse_to_torch(sparse_mx, device='cpu', return_sparse=False):

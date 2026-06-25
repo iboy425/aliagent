@@ -40,7 +40,8 @@ from rec_heuristics import (
     rank_items,
 )
 from utils import (
-    normalize_adj, random_walk_normalize, sparse_to_torch,
+    normalize_adj, normalize_adj_sparse,
+    random_walk_normalize, random_walk_normalize_sparse, sparse_to_torch,
     preprocess_features,
     set_seed, get_device, setup_logger
 )
@@ -189,6 +190,8 @@ def _prepare_task1_tensors(data, model_args, device):
     """
     normalize_type = model_args.get('normalize', 'symmetric')
     feature_norm = model_args.get('feature_norm', 'none')
+    model_type = model_args.get('model_type', 'sage')
+    adj_format = model_args.get('adj_format', 'dense')
 
     features_raw = preprocess_features(data['features'], method=feature_norm)
     if sp.issparse(features_raw):
@@ -196,13 +199,14 @@ def _prepare_task1_tensors(data, model_args, device):
     else:
         features = torch.FloatTensor(features_raw).to(device)
 
+    use_sparse_adj = adj_format == 'sparse' and model_type == 'gcn'
     if normalize_type == 'symmetric':
-        adj = normalize_adj(data['adj']).to(device)
+        adj = normalize_adj_sparse(data['adj'], device=device) if use_sparse_adj else normalize_adj(data['adj']).to(device)
     elif normalize_type == 'random_walk':
-        adj = random_walk_normalize(data['adj']).to(device)
+        adj = random_walk_normalize_sparse(data['adj'], device=device) if use_sparse_adj else random_walk_normalize(data['adj']).to(device)
     else:
         if sp.issparse(data['adj']):
-            adj = sparse_to_torch(data['adj'], device=device)
+            adj = sparse_to_torch(data['adj'], device=device, return_sparse=use_sparse_adj)
         else:
             adj = torch.FloatTensor(data['adj']).to(device)
 
