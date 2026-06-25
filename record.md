@@ -1035,3 +1035,65 @@ rm -rf framework/output/exp011_smoke_sparse_gcn
 是否保留：
 
 - 保留。后续 GCN 搜索统一优先使用 `--adj_format sparse`。
+
+---
+
+## Exp-010：A1 结构网格搜索与强模型 ensemble 评估
+
+日期：2026-06-25
+
+目标：
+
+- 扩大 A1 模型结构搜索空间，不再只依赖 Exp-008 的 SAGE 多 seed。
+- 比较 GCN / SAGE、hidden_dim、归一化方式等配置。
+- 在固定验证集 `split_seed=42` 上评估强 checkpoint 的 ensemble。
+
+关键发现：
+
+- GCN 在本轮明显强于 Exp-008 的 SAGE 方案。
+- 单模型最好结果：
+  - `output/exp010_a1_grid_c6_gcn_h384_l2_symmetric_none_seed777`
+  - 固定验证集 `val_acc=0.677626`
+- 当前线上提交使用的 Exp-008 A1 Top-2 ensemble 固定验证集为 `0.659361`。
+- 因此仅单模型已提升 `+0.018265`。
+
+强 checkpoint 固定验证集单模型结果：
+
+| 排名 | checkpoint | val_acc |
+|---:|---|---:|
+| 1 | `c6_gcn_h384_seed777` | 0.677626 |
+| 2 | `c5_gcn_h256_seed777` | 0.674886 |
+| 3 | `c1_sage_h384_seed3407` | 0.673059 |
+| 4 | `c5_gcn_h256_seed42` | 0.673059 |
+| 5 | `c7_sage_h256_random_walk_seed777` | 0.672146 |
+| 6 | `c5_gcn_h256_seed3407` | 0.672146 |
+| 7 | `c6_gcn_h384_seed3407` | 0.669406 |
+| 8 | `c6_gcn_h384_seed42` | 0.668493 |
+
+ensemble 结果：
+
+| 方案 | val_acc |
+|---|---:|
+| Top-1 | 0.677626 |
+| Top-2 | 0.671233 |
+| Top-3 | 0.678539 |
+| Top-4 | 0.677626 |
+| Top-5 | 0.689498 |
+| Top-6 | 0.683105 |
+| Top-7 | 0.681279 |
+| Top-8 | 0.679452 |
+
+结论：
+
+- 最优方案是 Top-5 ensemble，固定验证集准确率 `0.689498`。
+- Top-5 相比 Exp-008 提交用 A1 方案提升 `+0.030137`。
+- Top-2 反而下降，说明 ensemble 不是越少越好；Top-6 之后也下降，说明弱模型会拉低融合。
+- 下一次提交候选应使用 Exp-010 Top-5 A1 ensemble，并继续沿用当前线上最优 A2 方案。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留 Top-5 A1 ensemble 作为下一次优先提交候选。
