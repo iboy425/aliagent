@@ -1592,6 +1592,23 @@ GPU 服务器 Top-5 ensemble 搜索结果：
   - 围绕 `smooth_alpha=0.7`、`smooth_iter=10` 的细网格搜索。
   - `random_walk` 与 `symmetric` 传播归一化对比。
 
+多 split 验证结果与修正结论：
+
+- 用户在 GPU 服务器上用同一组 Exp-010 Top-5 checkpoint 评估多个 `split_seed`：
+  - `seed42.json`: `base=0.689498`, `cs=0.700457`, `gain=+0.010959`
+  - `seed2024.json`: `base=0.979909`, `cs=0.979909`, `gain=+0.000000`
+  - `seed2026.json`: `base=0.968950`, `cs=0.968950`, `gain=+0.000000`
+  - `seed3407.json`: `base=0.969863`, `cs=0.969863`, `gain=+0.000000`
+  - `seed777.json`: `base=0.971689`, `cs=0.971689`, `gain=+0.000000`
+- 该多 split 结果无效：
+  - Exp-010 Top-5 checkpoint 是围绕 `split_seed=42` 训练和筛选的。
+  - 当用同一批 checkpoint 评估其他 split 时，其他 split 的验证节点大部分已出现在 checkpoint 训练集中。
+  - 因此 `0.97` 左右的准确率是训练标签泄漏，不是泛化性能。
+- 修正后的可信结论：
+  - `split_seed=42` 仍然是当前这组 checkpoint 的可信 holdout。
+  - C&S 在该可信 holdout 上从 `0.689498` 提升到 `0.700457`，这个 `+0.010959` 仍可作为有效信号。
+  - 若要做真正多 split 验证，必须为每个 split 重新训练对应 checkpoint，不能复用只在 `split_seed=42` 下训练筛选出的模型。
+
 GPU 服务器下一步搜索命令：
 
 ```bash
