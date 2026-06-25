@@ -571,3 +571,70 @@ python3 code/validate_submission.py --zip_path output/exp006_submit_a1_stable_a2
 
 - 以 `A1=0.6369`、`A2=0.4647` 为新基线。
 - 下一轮优先做 A1 多 seed / 多 checkpoint 集成；A2 只做小范围启发式参数搜索，不再优先大跑 SASRec。
+
+---
+
+## Tool-001：补齐 A1 多 checkpoint 集成推理
+
+日期：2026-06-25
+
+目标：
+
+- 为下一阶段 GPU 多 seed 训练做准备。
+- 让 `code/infer.py` 已有的 `--ensemble_checkpoints` 参数真正支持 Task 1。
+- 支持多个 A1 checkpoint 做 logits 平均，生成一个更稳健的 `A1.csv`。
+
+修改文件：
+
+- `framework/code/infer.py`
+
+修改内容：
+
+- 新增 `_prepare_task1_tensors()`：
+  - 按每个 checkpoint 保存的训练参数读取 `feature_norm` 和 `normalize`。
+  - 分别复现训练时的特征归一化和邻接矩阵归一化。
+  - 这样不同 seed 或不同配置训练出来的模型，可以用各自正确的数据预处理方式推理。
+- 修改 `infer_task1()`：
+  - 原来 Task 1 只能使用单个 `--checkpoint`。
+  - 现在支持 `--ensemble_checkpoints ckpt1 ckpt2 ...`。
+  - 每个 checkpoint 单独前向计算测试节点 logits。
+  - 对所有 logits 求平均，再取 `argmax` 得到最终类别。
+  - 每个模型推理结束后释放显存，降低 GPU 显存占用。
+
+原理说明：
+
+- 单模型输出的 `label` 只告诉我们“它最终选了哪个类别”。
+- logits 是模型对 10 个类别的原始信心分，比最终标签包含更多信息。
+- 多 seed 模型的错误通常不完全相同，把 logits 平均后可以降低单个模型随机性带来的波动。
+- 这一步不改变训练过程，只改变最终 A1 推理融合方式，风险较低。
+
+验证命令：
+
+```bash
+cd /home/aliagent
+python3 -m py_compile framework/code/infer.py
+python3 framework/code/infer.py \
+  --task task1 \
+  --data_path framework/data/cls_data/A1.npz \
+  --ensemble_checkpoints \
+    framework/output/exp006_a1_sage_stable/best_model.pt \
+    framework/output/exp006_a1_sage_stable/best_model.pt \
+  --output_path framework/output/exp007_smoke_a1_ensemble/A1.csv \
+  --device cpu
+rm -rf framework/output/exp007_smoke_a1_ensemble
+```
+
+验证结果：
+
+- `py_compile` 通过。
+- 重复同一个 checkpoint 做 2 模型集成，输出类别分布与单模型一致：
+  - `{0: 65, 1: 382, 2: 254, 3: 69, 4: 1262, 5: 44, 6: 54, 7: 144, 8: 447, 9: 30}`
+- 临时烟测输出已删除，避免污染正式实验目录。
+
+线上指标：
+
+- 尚未提交。该记录只是工具能力补齐。
+
+是否保留：
+
+- 保留。下一轮 GPU 实验将使用该功能做 A1 多 seed 集成。

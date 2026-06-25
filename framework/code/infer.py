@@ -180,14 +180,44 @@ def load_model_from_checkpoint(checkpoint_path, device):
     return model, args_dict
 
 
+def _prepare_task1_tensors(data, model_args, device):
+    """按单个检查点的训练配置准备A1推理张量
+
+    不同检查点可能使用不同的邻接矩阵归一化或特征归一化方式。
+    集成推理时必须逐个检查点复现对应的数据预处理，否则模型看到的
+    输入分布会和训练时不一致，平均logits也会被错误输入污染。
+    """
+    normalize_type = model_args.get('normalize', 'symmetric')
+    feature_norm = model_args.get('feature_norm', 'none')
+
+    features_raw = preprocess_features(data['features'], method=feature_norm)
+    if sp.issparse(features_raw):
+        features = sparse_to_torch(features_raw, device=device)
+    else:
+        features = torch.FloatTensor(features_raw).to(device)
+
+    if normalize_type == 'symmetric':
+        adj = normalize_adj(data['adj']).to(device)
+    elif normalize_type == 'random_walk':
+        adj = random_walk_normalize(data['adj']).to(device)
+    else:
+        if sp.issparse(data['adj']):
+            adj = sparse_to_torch(data['adj'], device=device)
+        else:
+            adj = torch.FloatTensor(data['adj']).to(device)
+
+    return features, adj
+
+
 def infer_task1(args):
     """Task 1推理 - GNN节点分类
 
     加载图数据和训练好的GNN模型,对测试节点进行分类预测,
     输出结果到CSV文件。
     """
-    if not args.checkpoint:
-        raise ValueError("Task 1推理必须提供 --checkpoint")
+    checkpoint_paths = args.ensemble_checkpoints or ([args.checkpoint] if args.checkpoint else [])
+    if not checkpoint_paths:
+        raise ValueError("Task 1推理必须提供 --checkpoint 或 --ensemble_checkpoints")
 
     logging.info("=" * 60)
     logging.info("开始 Task 1 推理 - GNN节点分类")
@@ -203,42 +233,36 @@ def infer_task1(args):
     num_classes = data['num_classes']
     logging.info(f"测试节点数: {len(test_idx)}, 特征维度: {num_features}, 类别数: {num_classes}")
 
-    # 加载checkpoint获取训练时的数据预处理方式
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    saved_args = checkpoint.get('args', {})
-    normalize_type = saved_args.get('normalize', 'symmetric')
-    feature_norm = saved_args.get('feature_norm', 'none')
-
-    # 2. 数据预处理。特征归一化必须与训练阶段保持一致。
-    features_raw = preprocess_features(data['features'], method=feature_norm)
-    if sp.issparse(features_raw):
-        features = sparse_to_torch(features_raw, device=device)
-    else:
-        features = torch.FloatTensor(features_raw).to(device)
-
-    # 邻接矩阵归一化(需与训练时一致)
-    if normalize_type == 'symmetric':
-        adj = normalize_adj(data['adj']).to(device)
-    elif normalize_type == 'random_walk':
-        adj = random_walk_normalize(data['adj']).to(device)
-    else:
-        if sp.issparse(data['adj']):
-            adj = sparse_to_torch(data['adj'], device=device)
-        else:
-            adj = torch.FloatTensor(data['adj']).to(device)
-
     test_idx_t = torch.LongTensor(test_idx).to(device)
 
-    # 3. 加载模型
-    model, model_args = load_model_from_checkpoint(args.checkpoint, device)
-
-    # 4. 推理
-    logging.info("开始推理...")
-    model.eval()
+    # 2. 逐个检查点推理并平均logits。
+    # logits平均比标签投票更细，因为它保留每个类别的置信度信息。
+    logging.info(f"开始推理，共 {len(checkpoint_paths)} 个检查点")
+    logits_sum = None
     with torch.no_grad():
-        logits = model(features, adj)
-        test_logits = logits[test_idx_t]
-        predictions = torch.argmax(test_logits, dim=1).cpu().numpy()
+        for ckpt_id, checkpoint_path in enumerate(checkpoint_paths, start=1):
+            logging.info(f"[{ckpt_id}/{len(checkpoint_paths)}] 加载检查点: {checkpoint_path}")
+            model, model_args = load_model_from_checkpoint(checkpoint_path, device)
+            features, adj = _prepare_task1_tensors(data, model_args, device)
+
+            model.eval()
+            logits = model(features, adj)[test_idx_t]
+            if logits_sum is None:
+                logits_sum = logits.detach().clone()
+            else:
+                if logits_sum.shape != logits.shape:
+                    raise ValueError(
+                        f"检查点输出shape不一致: {checkpoint_path}, "
+                        f"{tuple(logits.shape)} != {tuple(logits_sum.shape)}"
+                    )
+                logits_sum += logits.detach()
+
+            del model, features, adj, logits
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
+        avg_logits = logits_sum / len(checkpoint_paths)
+        predictions = torch.argmax(avg_logits, dim=1).cpu().numpy()
 
     logging.info(f"预测完成,预测类别分布:")
     unique, counts = np.unique(predictions, return_counts=True)
