@@ -548,16 +548,19 @@ python3 code/validate_submission.py --zip_path output/exp006_submit_a1_stable_a2
 
 线上指标：
 
-- 未提交线上。
+- 已提交 `framework/output/exp006_submit_a1_stable_a2_exp004/prediction.zip` 到 A 榜。
+- 提交时间：2026-06-24 22:55:03
+- 总分：`0.5508`
+- 分类任务分数：`0.6369`
+- 推荐任务分数：`0.4647`
 
 结论：
 
 - A1 不应该开启 `class_weight=balanced`；稳健 SAGE 配置明显更好。
-- A1 新候选值得提交验证，尤其因为本地验证从 baseline 快速复现的低准确率提升到 `0.6329`。
+- A1 新候选线上验证有效：本地 `val_acc=0.632877`，线上分类分数 `0.6369`，说明当前 A1 验证集划分与线上分布比较一致。
 - A2 官方 SASRec 训练可以跑通，但当前不适合作为主提交方案；A2 仍应使用 `item_seq_raw + recent_n=10 + history_filter=none` 的启发式共现路线。
-- 当前最建议提交：
-  - 首选：`framework/output/exp006_submit_a1_stable_a2_exp003/prediction.zip`
-  - 备选：`framework/output/exp006_submit_a1_stable_a2_exp004/prediction.zip`
+- A2 用户画像融合线上有效：推荐分从 Exp-002 的 `0.4548` 提升到 `0.4647`。
+- 当前最高线上总分为 `0.5508`，Exp-006 成为新的线上基线。
 
 是否保留：
 
@@ -566,5 +569,5 @@ python3 code/validate_submission.py --zip_path output/exp006_submit_a1_stable_a2
 
 下一步：
 
-- 先提交 `exp006_submit_a1_stable_a2_exp003/prediction.zip`，验证新 A1 是否提升线上分类分数。
-- 如果线上 A1 提升明显，再考虑用同一 A1 组合 Exp-004 A2 用户画像融合版本。
+- 以 `A1=0.6369`、`A2=0.4647` 为新基线。
+- 下一轮优先做 A1 多 seed / 多 checkpoint 集成；A2 只做小范围启发式参数搜索，不再优先大跑 SASRec。
