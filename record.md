@@ -832,3 +832,53 @@ CUDA_VISIBLE_DEVICES=0 python3 code/a1_ensemble_eval.py \
   - A2：`0.4647 -> 0.4647`，持平
 - A1 Top-2 ensemble 线上有效，但提升幅度小于本地固定验证集增益。
 - 继续简单增加 seed 的收益可能递减；下一步需要扩大 A1 模型/特征/归一化搜索空间，并用固定验证集筛选。
+
+---
+
+## Tool-003：新增 A1 标签传播融合工具
+
+日期：2026-06-25
+
+目标：
+
+- 为 Exp-009 准备 A1 后处理提分工具。
+- 在 GNN logits 之外，额外利用图上已知训练标签的传播信号。
+
+修改文件：
+
+- `framework/code/a1_labelprop.py`
+
+核心思路：
+
+- GNN 输出：模型根据节点特征和邻接关系给每个节点打 10 类 logits。
+- 标签传播输出：把已知训练节点标签转为 one-hot，然后沿图边迭代传播，得到每个节点的类别置信度。
+- 融合输出：`final_score = (1 - lp_weight) * model_prob + lp_weight * label_prop_score`。
+
+为什么可能有效：
+
+- A1 是图节点分类任务，测试节点虽然没有标签，但它们和训练节点在同一张图中。
+- 如果图存在同质性，相邻或近邻产品更可能属于相同类别。
+- 当前 GraphSAGE 线上 A1 只有 `0.6496`，距离第一名 A1 `0.76845` 差距仍大，说明还需要更强的结构利用方式。
+- 标签传播是低成本结构后处理，不需要重新训练模型，适合快速验证。
+
+脚本功能：
+
+- 支持多个 checkpoint logits 平均。
+- 支持固定验证集搜索：
+  - `alpha`：标签传播保留邻居信息的比例。
+  - `num_iter`：传播轮数。
+  - `lp_weight`：标签传播分数和模型分数的融合权重。
+- 支持用搜索出的参数生成最终 `A1.csv`。
+
+验证结果：
+
+- `python3 -m py_compile framework/code/a1_labelprop.py framework/code/infer.py framework/code/train.py` 通过。
+- CPU 烟测因 dense 图矩阵乘法较慢中止；正式验证应在 GPU 服务器执行。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留。下一步在 GPU 上执行 Exp-009 标签传播参数搜索。
