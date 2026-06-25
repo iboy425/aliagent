@@ -882,3 +882,72 @@ CUDA_VISIBLE_DEVICES=0 python3 code/a1_ensemble_eval.py \
 是否保留：
 
 - 保留。下一步在 GPU 上执行 Exp-009 标签传播参数搜索。
+
+---
+
+## Exp-009：A1 Top-2 ensemble + 标签传播融合搜索
+
+日期：2026-06-25
+
+目标：
+
+- 在 Exp-008 A1 Top-2 ensemble 基础上，尝试使用图标签传播后处理继续提升 A1。
+- 使用固定验证集 `split_seed=42` 搜索标签传播参数。
+
+输入 checkpoint：
+
+- `output/exp008_a1_sage_fixedsplit_seed777/best_model.pt`
+- `output/exp008_a1_sage_fixedsplit_seed42/best_model.pt`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+
+CUDA_VISIBLE_DEVICES=0 python3 code/a1_labelprop.py \
+  --data_path data/cls_data/A1.npz \
+  --checkpoints \
+    output/exp008_a1_sage_fixedsplit_seed777/best_model.pt \
+    output/exp008_a1_sage_fixedsplit_seed42/best_model.pt \
+  --device cuda \
+  --val_ratio 0.1 \
+  --split_seed 42 \
+  --stratified_split \
+  --lp_normalize random_walk \
+  --alphas 0.1,0.3,0.5,0.7,0.85 \
+  --num_iters 5,10,20,40 \
+  --lp_weights 0,0.02,0.05,0.1,0.15,0.2,0.3 \
+  --output_json output/exp009_a1_labelprop_search/results.json
+```
+
+本地固定验证集结果：
+
+- 模型原始验证准确率：`0.659361`
+- 最佳标签传播融合：
+  - `alpha=0.7`
+  - `num_iter=5`
+  - `lp_weight=0.3`
+  - `val_acc=0.660274`
+
+Top 结果摘要：
+
+| 方案 | val_acc |
+|---|---:|
+| model only | 0.659361 |
+| label propagation best | 0.660274 |
+
+结论：
+
+- 标签传播方向在固定验证集上有正收益，但只提升 `+0.000913`。
+- 这个提升约等于验证集上多预测对 1 个节点，统计信号很弱。
+- 不建议优先消耗线上提交次数，除非当天提交次数充足。
+- 标签传播工具保留，后续如果有更强 A1 checkpoint，可再次尝试融合。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留搜索结果和工具。
+- 暂不把 Exp-009 作为优先提交方案。
