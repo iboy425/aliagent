@@ -1478,3 +1478,130 @@ python3 framework/code/a2_offline_eval.py \
 是否保留：
 
 - 保留。
+
+---
+
+## Exp-016：A1 Correct and Smooth 后处理工具
+
+日期：2026-06-25
+
+目标：
+
+- 按图半监督节点分类的强基线思路，引入 Correct and Smooth 后处理。
+- 不重新训练 A1 模型，直接读取已有 checkpoint 的预测概率做图上传播。
+- 先用本地已有旧 checkpoint 做真实数据烟测；最终高分搜索需要在 GPU 服务器上使用 Exp-010 Top-5 checkpoint。
+
+修改文件：
+
+- `framework/code/a1_correct_smooth.py`
+  - 新增 A1 Correct and Smooth 独立工具。
+  - 支持多 checkpoint logits 平均。
+  - 支持固定验证集参数搜索。
+  - 支持带 `--output_path` 生成 `A1.csv`。
+  - C&S 传播邻接矩阵默认使用 PyTorch sparse tensor，避免 dense `N x N` 邻接矩阵浪费显存和计算。
+- `framework/tests/test_a1_correct_smooth.py`
+  - 新增核心单元测试。
+  - 覆盖残差传播、标签锚点平滑、alpha=0 重启行为、全零行概率修复。
+
+原理说明：
+
+- 普通 GCN/SAGE 只把节点特征和邻居特征聚合进模型参数，训练标签只通过损失函数影响模型。
+- A1 图的已标注节点之间同类边比例约 `0.7853`，说明图上标签同质性很强。
+- Correct 阶段：
+  - 在训练节点上计算 `真实 one-hot 标签 - 模型预测概率`。
+  - 把这个残差沿图传播到邻居，相当于告诉模型“哪些区域容易被错分”。
+- Smooth 阶段：
+  - 把训练节点真实标签作为锚点。
+  - 把修正后的预测概率沿图平滑，使相邻节点预测更一致。
+- 本次烟测最佳参数中 `correct_weight=0`，说明在旧单模型上主要收益来自 Smooth；后续 Top-5 ensemble 需要继续验证 Correct 是否有额外增益。
+
+测试命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_a1_correct_smooth -v
+python3 -m py_compile framework/code/a1_correct_smooth.py framework/code/utils.py framework/code/infer.py
+```
+
+测试结果：
+
+- 单元测试：4 个测试全部通过。
+- 语法检查：通过。
+
+本地烟测命令：
+
+```bash
+cd /home/aliagent
+python3 framework/code/a1_correct_smooth.py \
+  --data_path framework/data/cls_data/A1.npz \
+  --checkpoints framework/output/exp006_a1_sage_stable/best_model.pt \
+  --device cpu \
+  --val_ratio 0.1 \
+  --split_seed 42 \
+  --stratified_split \
+  --cs_normalize random_walk \
+  --correct_alphas 0.5,0.85 \
+  --correct_iters 5,10 \
+  --correct_weights 0,0.5,1.0 \
+  --smooth_alphas 0.5,0.85 \
+  --smooth_iters 5,10 \
+  --smooth_weights 0,0.25,0.5 \
+  --output_json framework/output/exp016_a1_cs_smoke/results.json
+```
+
+本地烟测结果：
+
+- checkpoint：`framework/output/exp006_a1_sage_stable/best_model.pt`
+- 原始验证准确率：`0.632877`
+- C&S 最佳验证准确率：`0.649315`
+- 本地提升：`+0.016438`
+- 最佳小网格参数：
+  - `correct_alpha=0.5`
+  - `correct_iter=5`
+  - `correct_weight=0.0`
+  - `smooth_alpha=0.85`
+  - `smooth_iter=5`
+  - `smooth_weight=0.5`
+
+GPU 服务器下一步搜索命令：
+
+```bash
+cd /home/aliagent
+git pull --ff-only
+
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 python3 code/a1_correct_smooth.py \
+  --data_path data/cls_data/A1.npz \
+  --checkpoints \
+    output/exp010_a1_grid_c6_gcn_h384_l2_symmetric_none_seed777/best_model.pt \
+    output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777/best_model.pt \
+    output/exp010_a1_grid_c1_sage_h384_l2_symmetric_none_seed3407/best_model.pt \
+    output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed42/best_model.pt \
+    output/exp010_a1_grid_c7_sage_h256_l2_random_walk_none_seed777/best_model.pt \
+  --device cuda \
+  --val_ratio 0.1 \
+  --split_seed 42 \
+  --stratified_split \
+  --cs_normalize random_walk \
+  --correct_alphas 0.3,0.5,0.7,0.85,0.95 \
+  --correct_iters 5,10,20,40 \
+  --correct_weights 0,0.1,0.25,0.5,0.75,1.0 \
+  --smooth_alphas 0.5,0.7,0.85,0.9,0.95 \
+  --smooth_iters 3,5,10,20,40 \
+  --smooth_weights 0,0.1,0.25,0.5,0.75,1.0 \
+  --output_json output/exp016_a1_cs_top5_search/results.json
+```
+
+线上指标：
+
+- 尚未提交。
+
+结论：
+
+- 保留。C&S 在旧 A1 单模型上已有明显本地收益。
+- 下一步优先在 GPU 服务器上用 Exp-010 Top-5 ensemble 跑搜索。
+- 如果 Top-5 ensemble 的 C&S 本地验证超过当前 `0.689498`，再生成新 A1 提交候选。
+
+是否保留：
+
+- 保留。
