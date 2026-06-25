@@ -706,3 +706,116 @@ python3 -m py_compile framework/code/train.py framework/code/a1_ensemble_eval.py
 是否保留：
 
 - 保留。后续 A1 GPU 实验统一使用 `--split_seed 42`，只改变 `--seed`。
+
+---
+
+## Exp-008：A1 固定验证集多 seed 训练与 Top-2 ensemble 选择
+
+日期：2026-06-25
+
+目标：
+
+- 使用 GPU 重训 A1 多个 seed。
+- 固定 `split_seed=42`，只改变模型训练随机种子，保证多个模型在同一份验证集上比较。
+- 用 `a1_ensemble_eval.py` 选择最优 A1 ensemble 组合。
+
+训练配置：
+
+- 模型：GraphSAGE
+- `hidden_dim=256`
+- `num_layers=2`
+- `lr=0.005`
+- `dropout=0.5`
+- `weight_decay=0.0005`
+- `patience=80`
+- `normalize=symmetric`
+- `feature_norm=none`
+- `dropedge_rate=0`
+- `feature_mask_rate=0`
+- `class_weight=none`
+- `stratified_split=True`
+- `split_seed=42`
+- `device=cuda`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+
+for seed in 42 2024 3407 777 2026
+do
+  CUDA_VISIBLE_DEVICES=0 python3 code/train.py \
+    --task task1 \
+    --data_path data/cls_data/A1.npz \
+    --output_dir output/exp008_a1_sage_fixedsplit_seed${seed} \
+    --epochs 500 \
+    --model_type sage \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --lr 0.005 \
+    --dropout 0.5 \
+    --weight_decay 0.0005 \
+    --patience 80 \
+    --normalize symmetric \
+    --feature_norm none \
+    --dropedge_rate 0 \
+    --feature_mask_rate 0 \
+    --class_weight none \
+    --stratified_split \
+    --split_seed 42 \
+    --device cuda \
+    --seed ${seed} \
+    --log_interval 5
+done
+
+CUDA_VISIBLE_DEVICES=0 python3 code/a1_ensemble_eval.py \
+  --data_path data/cls_data/A1.npz \
+  --checkpoints \
+    output/exp008_a1_sage_fixedsplit_seed42/best_model.pt \
+    output/exp008_a1_sage_fixedsplit_seed2024/best_model.pt \
+    output/exp008_a1_sage_fixedsplit_seed3407/best_model.pt \
+    output/exp008_a1_sage_fixedsplit_seed777/best_model.pt \
+    output/exp008_a1_sage_fixedsplit_seed2026/best_model.pt \
+  --device cuda \
+  --val_ratio 0.1 \
+  --split_seed 42 \
+  --stratified_split \
+  --topks 1,2,3,4,5 \
+  --output_json output/exp008_a1_fixedsplit_eval/results.json
+```
+
+固定验证集单模型结果：
+
+| 排名 | seed | val_acc |
+|---:|---:|---:|
+| 1 | 777 | 0.652055 |
+| 2 | 42 | 0.650228 |
+| 3 | 3407 | 0.641096 |
+| 4 | 2026 | 0.631963 |
+| 5 | 2024 | 0.622831 |
+
+集成验证结果：
+
+| 方案 | val_acc |
+|---|---:|
+| Top-1 | 0.652055 |
+| Top-2 | 0.659361 |
+| Top-3 | 0.657534 |
+| Top-4 | 0.652968 |
+| Top-5 | 0.644749 |
+
+结论：
+
+- 固定验证集后，单模型最好的是 `seed=777`，不是第一轮非固定验证集里的 `seed=2026`。
+- 这证明之前不同 seed 的验证分数确实受验证集划分影响，不能直接比较。
+- 最优 ensemble 是 Top-2：`seed=777 + seed=42`，验证准确率 `0.659361`。
+- Top-3/Top-4/Top-5 反而下降，说明较弱 checkpoint 会拉低平均 logits。
+- 下一步提交候选应使用 A1 Top-2 ensemble，并沿用当前最优 A2 启发式推荐方案。
+
+线上指标：
+
+- 尚未提交。
+
+是否保留：
+
+- 保留 Top-2 A1 ensemble 作为下一次提交候选。
