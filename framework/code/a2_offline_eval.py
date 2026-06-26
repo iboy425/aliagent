@@ -19,12 +19,15 @@ import pandas as pd
 from rec_heuristics import (
     build_cooccur_stats,
     build_global_popularity,
+    build_item_feature_transition_stats,
     build_user_combo_profile_stats,
     build_user_profile_stats,
     choose_seq_col,
+    get_item_feature_counters,
     get_user_combo_profile_counters,
     get_user_profile_counters,
     parse_item_counts,
+    parse_item_feature_cols,
     parse_seq,
     parse_user_profile_cols,
     rank_items,
@@ -170,10 +173,18 @@ def evaluate_strategy(
     user_lookup: pd.DataFrame = None,
     user_profile_stats: Dict[str, Dict[str, Counter]] = None,
     user_combo_profile_stats: Dict = None,
+    item_lookup: pd.DataFrame = None,
+    item_feature_stats: Dict = None,
     user_cols: Sequence[str] = (),
+    item_feature_cols: Sequence[str] = (),
     user_weight: float = 0.0,
     user_combo_weight: float = 0.0,
+    user_combo_mode: str = "prefix",
     user_combo_min_count: int = 5,
+    item_feature_weight: float = 0.0,
+    item_feature_recent_n: int = 10,
+    item_feature_min_count: int = 20,
+    cooccur_decay: float = 1.0,
     pop_penalty_weight: float = 0.0,
     history_count_weight: float = 0.0,
 ) -> Dict:
@@ -196,8 +207,17 @@ def evaluate_strategy(
             combo_profile_stats=user_combo_profile_stats,
             min_count=user_combo_min_count,
         )
+        seq = parse_seq(row.get(seq_col))
+        item_feature_counters = get_item_feature_counters(
+            seq=seq,
+            item_lookup=item_lookup,
+            item_feature_stats=item_feature_stats,
+            feature_cols=item_feature_cols,
+            recent_n=item_feature_recent_n,
+            min_count=item_feature_min_count,
+        )
         preds = rank_items(
-            seq=parse_seq(row.get(seq_col)),
+            seq=seq,
             candidate_items=candidate_items,
             global_pop=global_pop,
             cooccur_stats=cooccur_stats,
@@ -207,9 +227,12 @@ def evaluate_strategy(
             recent_n=recent_n,
             user_profile_counters=user_counters,
             user_combo_counters=user_combo_counters,
+            item_feature_counters=item_feature_counters,
             history_counts=parse_item_counts(row.get("item_seq_counts")),
             user_weight=user_weight,
             user_combo_weight=user_combo_weight,
+            item_feature_weight=item_feature_weight,
+            cooccur_decay=cooccur_decay,
             history_count_weight=history_count_weight,
             pop_penalty_weight=pop_penalty_weight,
         )
@@ -234,7 +257,12 @@ def evaluate_strategy(
         "topk": topk,
         "user_weight": user_weight,
         "user_combo_weight": user_combo_weight,
+        "user_combo_mode": user_combo_mode,
         "user_combo_min_count": user_combo_min_count,
+        "item_feature_weight": item_feature_weight,
+        "item_feature_recent_n": item_feature_recent_n,
+        "item_feature_min_count": item_feature_min_count,
+        "cooccur_decay": cooccur_decay,
         "pop_penalty_weight": pop_penalty_weight,
         "history_count_weight": history_count_weight,
         "samples": len(rows),
@@ -296,13 +324,26 @@ def parse_args():
         help="历史序列列名，默认自动选择 item_seq_dedup",
     )
     parser.add_argument("--recent_n", type=int, default=20, help="共现统计使用最近多少个历史item")
+    parser.add_argument("--cooccur_decay", type=float, default=1.0,
+                        help="历史共现近因衰减系数，1.0表示不衰减")
     parser.add_argument("--user_weight", type=float, default=0.0, help="用户画像分组热门度融合权重")
     parser.add_argument("--user_combo_weight", type=float, default=0.0,
                         help="用户画像前缀组合热门度融合权重")
     parser.add_argument("--user_combo_sizes", type=str, default="3,2,1",
                         help="逗号分隔的用户画像前缀组合长度")
+    parser.add_argument("--user_combo_mode", type=str, default="prefix",
+                        choices=["prefix", "all"],
+                        help="用户画像组合模式: prefix=只用前缀组合，all=枚举所有指定长度组合")
     parser.add_argument("--user_combo_min_count", type=int, default=5,
                         help="画像组合最少训练样本数")
+    parser.add_argument("--item_feature_weight", type=float, default=0.0,
+                        help="物品特征转移热门度融合权重")
+    parser.add_argument("--item_feature_cols", type=str, default="auto",
+                        help="物品特征列，auto表示使用item.csv中除iid外全部列，空字符串表示关闭")
+    parser.add_argument("--item_feature_min_count", type=int, default=20,
+                        help="物品特征分组最少训练样本数")
+    parser.add_argument("--item_feature_recent_n", type=int, default=-1,
+                        help="物品特征转移使用最近多少个历史item；小于等于0时跟随recent_n")
     parser.add_argument(
         "--user_profile_cols",
         type=str,
@@ -366,11 +407,30 @@ def main():
                         user_df=user_df,
                         user_cols=user_cols,
                         combo_sizes=combo_sizes,
+                        combo_mode=args.user_combo_mode,
                         min_count=args.user_combo_min_count,
                         user_col=user_col,
                     )
         else:
             print("警告: 启用用户画像融合，但未找到user.csv，画像融合关闭")
+
+    item_feature_cols = []
+    item_lookup = None
+    item_feature_stats = None
+    item_feature_recent_n = args.recent_n if args.item_feature_recent_n <= 0 else args.item_feature_recent_n
+    if args.item_feature_weight > 0:
+        item_feature_cols = parse_item_feature_cols(item_df, args.item_feature_cols)
+        if item_feature_cols:
+            item_feature_stats, item_lookup = build_item_feature_transition_stats(
+                train_df=fit_df,
+                item_df=item_df,
+                seq_col=seq_col,
+                feature_cols=item_feature_cols,
+                recent_n=item_feature_recent_n,
+                min_count=args.item_feature_min_count,
+            )
+        else:
+            print("警告: 启用物品特征融合，但未选择任何物品特征列，物品特征融合关闭")
 
     print("=" * 80)
     print("A2离线评估")
@@ -382,10 +442,18 @@ def main():
     print(f"history_filter: {args.history_filter}, recent_n: {args.recent_n}")
     print(
         f"user_weight: {args.user_weight}, user_combo_weight: {args.user_combo_weight}, "
-        f"user_combo_sizes: {args.user_combo_sizes}, user_combo_min_count: {args.user_combo_min_count}, "
+        f"user_combo_sizes: {args.user_combo_sizes}, user_combo_mode: {args.user_combo_mode}, "
+        f"user_combo_min_count: {args.user_combo_min_count}, "
         f"user_cols: {user_cols}, pop_penalty_weight: {args.pop_penalty_weight}"
     )
+    print(
+        f"item_feature_weight: {args.item_feature_weight}, "
+        f"item_feature_cols: {item_feature_cols}, "
+        f"item_feature_recent_n: {item_feature_recent_n}, "
+        f"item_feature_min_count: {args.item_feature_min_count}"
+    )
     print(f"history_count_weight: {args.history_count_weight}")
+    print(f"cooccur_decay: {args.cooccur_decay}")
     print(f"test_like_eval: {args.test_like_eval}, sort_metric: {args.sort_metric}")
     print(f"test bucket weights: {bucket_weights}")
     print("-" * 80)
@@ -406,10 +474,18 @@ def main():
             user_lookup=user_lookup,
             user_profile_stats=user_profile_stats,
             user_combo_profile_stats=user_combo_profile_stats,
+            item_lookup=item_lookup,
+            item_feature_stats=item_feature_stats,
             user_cols=user_cols,
+            item_feature_cols=item_feature_cols,
             user_weight=args.user_weight,
             user_combo_weight=args.user_combo_weight,
+            user_combo_mode=args.user_combo_mode,
             user_combo_min_count=args.user_combo_min_count,
+            item_feature_weight=args.item_feature_weight,
+            item_feature_recent_n=item_feature_recent_n,
+            item_feature_min_count=args.item_feature_min_count,
+            cooccur_decay=args.cooccur_decay,
             pop_penalty_weight=args.pop_penalty_weight,
             history_count_weight=args.history_count_weight,
         )

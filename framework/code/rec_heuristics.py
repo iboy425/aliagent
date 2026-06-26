@@ -11,6 +11,7 @@
 """
 import math
 from collections import Counter, defaultdict
+from itertools import combinations
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -86,6 +87,20 @@ def parse_user_profile_cols(user_df: pd.DataFrame, user_col: str, requested: str
     return cols
 
 
+def parse_item_feature_cols(item_df: pd.DataFrame, requested: str) -> List[str]:
+    """解析 item.csv 特征列配置"""
+    if not requested:
+        return []
+    if requested == "auto":
+        return [col for col in item_df.columns if col != "iid"]
+
+    cols = [col.strip() for col in requested.split(",") if col.strip()]
+    missing = [col for col in cols if col not in item_df.columns]
+    if missing:
+        raise ValueError(f"item.csv中不存在这些物品特征列: {missing}")
+    return cols
+
+
 def build_user_profile_stats(
     train_df: pd.DataFrame,
     user_df: pd.DataFrame,
@@ -134,6 +149,7 @@ def build_user_combo_profile_stats(
     user_df: pd.DataFrame,
     user_cols: Sequence[str],
     combo_sizes: Sequence[int],
+    combo_mode: str = "prefix",
     min_count: int = 5,
     user_col: str = "uid",
     target_col: str = "target_iid",
@@ -143,11 +159,19 @@ def build_user_combo_profile_stats(
     单列画像信号较弱；前几列组合能更细地刻画冷启动用户。这里采用
     “前缀组合”而不是任意列组合，避免组合数量爆炸。
     """
+    if combo_mode not in {"prefix", "all"}:
+        raise ValueError(f"未知用户画像组合模式: {combo_mode}")
+
     specs = []
     for size in combo_sizes:
         size = int(size)
-        if 1 <= size <= len(user_cols):
-            spec = tuple(user_cols[:size])
+        if not (1 <= size <= len(user_cols)):
+            continue
+        if combo_mode == "prefix":
+            candidates = [tuple(user_cols[:size])]
+        else:
+            candidates = [tuple(cols) for cols in combinations(user_cols, size)]
+        for spec in candidates:
             if spec not in specs:
                 specs.append(spec)
 
@@ -175,6 +199,7 @@ def build_user_combo_profile_stats(
         "stats": stats,
         "group_counts": group_counts,
         "min_count": min_count,
+        "combo_mode": combo_mode,
     }, user_df.set_index(user_col)
 
 
@@ -233,6 +258,101 @@ def get_user_combo_profile_counters(
         counter = stats.get(spec, {}).get(key)
         if counter:
             counters.append(counter)
+    return counters
+
+
+def build_item_feature_transition_stats(
+    train_df: pd.DataFrame,
+    item_df: pd.DataFrame,
+    seq_col: str,
+    feature_cols: Sequence[str],
+    recent_n: int = 10,
+    min_count: int = 20,
+    target_col: str = "target_iid",
+    item_col: str = "iid",
+) -> Tuple[Dict, pd.DataFrame]:
+    """统计历史item特征到target item的转移热门度
+
+    exact item 共现对短历史用户有效，但样本稀疏时不稳定。item 类目转移
+    把历史 item 映射到 `i_cat_*` / bucket 特征后统计 target 分布，可作为
+    短历史用户的泛化召回信号。
+    """
+    stats = {col: defaultdict(Counter) for col in feature_cols}
+    group_counts = {col: Counter() for col in feature_cols}
+    item_df = item_df.copy()
+    item_df[item_col] = item_df[item_col].astype(str)
+    if not feature_cols:
+        return {"feature_cols": [], "stats": stats, "group_counts": group_counts, "min_count": min_count}, item_df.set_index(item_col)
+
+    item_lookup = item_df.set_index(item_col)
+    for _, row in train_df.iterrows():
+        target = str(row[target_col])
+        seq = parse_seq(row.get(seq_col))
+        if recent_n > 0:
+            seq = seq[-recent_n:]
+
+        seen_keys = set()
+        for item in dict.fromkeys(seq):
+            if item not in item_lookup.index:
+                continue
+            item_row = item_lookup.loc[item]
+            for col in feature_cols:
+                value = item_row.get(col)
+                if pd.isna(value):
+                    continue
+                key = str(value)
+                pair = (col, key)
+                if pair in seen_keys:
+                    continue
+                seen_keys.add(pair)
+                stats[col][key][target] += 1
+                group_counts[col][key] += 1
+
+    return {
+        "feature_cols": list(feature_cols),
+        "stats": stats,
+        "group_counts": group_counts,
+        "min_count": min_count,
+    }, item_lookup
+
+
+def get_item_feature_counters(
+    seq: Sequence[str],
+    item_lookup: Optional[pd.DataFrame],
+    item_feature_stats: Optional[Mapping],
+    feature_cols: Sequence[str],
+    recent_n: int = 10,
+    min_count: Optional[int] = None,
+) -> List[Counter]:
+    """获取当前历史序列对应的item特征转移计数器"""
+    if item_lookup is None or not item_feature_stats or not feature_cols:
+        return []
+
+    threshold = item_feature_stats.get("min_count", 1) if min_count is None else min_count
+    stats = item_feature_stats.get("stats", {})
+    group_counts = item_feature_stats.get("group_counts", {})
+    recent_seq = list(seq[-recent_n:]) if recent_n > 0 else list(seq)
+
+    counters = []
+    seen_keys = set()
+    for item in dict.fromkeys(recent_seq):
+        if item not in item_lookup.index:
+            continue
+        item_row = item_lookup.loc[item]
+        for col in feature_cols:
+            value = item_row.get(col)
+            if pd.isna(value):
+                continue
+            key = str(value)
+            pair = (col, key)
+            if pair in seen_keys:
+                continue
+            seen_keys.add(pair)
+            if group_counts.get(col, {}).get(key, 0) < threshold:
+                continue
+            counter = stats.get(col, {}).get(key)
+            if counter:
+                counters.append(counter)
     return counters
 
 
@@ -300,13 +420,19 @@ def _add_cooccur_scores(
     history_items: Sequence[str],
     cooccur_stats: Mapping[str, Counter],
     weight: float,
+    decay: float = 1.0,
 ):
     """加入历史共现分数"""
     if weight <= 0:
         return
-    for hist_item in history_items:
+    if decay <= 0:
+        decay = 1.0
+
+    # 默认 decay=1.0 时完全复现旧逻辑；小于1时最近item权重最高。
+    for age, hist_item in enumerate(reversed(history_items)):
+        item_weight = decay ** age
         for target, count in cooccur_stats.get(hist_item, {}).items():
-            scores[target] = scores.get(target, 0.0) + weight * math.log1p(count)
+            scores[target] = scores.get(target, 0.0) + weight * item_weight * math.log1p(count)
 
 
 def _add_model_scores(
@@ -393,12 +519,15 @@ def rank_items(
     model_scores: Optional[Mapping[str, float]] = None,
     user_profile_counters: Optional[Sequence[Counter]] = None,
     user_combo_counters: Optional[Sequence[Counter]] = None,
+    item_feature_counters: Optional[Sequence[Counter]] = None,
     history_counts: Optional[Counter] = None,
     model_weight: float = 1.0,
     pop_weight: float = 1.0,
     cooccur_weight: float = 1.0,
+    cooccur_decay: float = 1.0,
     user_weight: float = 0.0,
     user_combo_weight: float = 0.0,
+    item_feature_weight: float = 0.0,
     history_count_weight: float = 0.0,
     pop_penalty_weight: float = 0.0,
     history_soft_factor: float = 0.5,
@@ -416,7 +545,10 @@ def rank_items(
         recent_n: 共现召回使用最近多少个历史item。
         model_scores: 可选的模型输出分数，key为原始iid。
         user_profile_counters: 当前用户画像对应的分组target热门计数器。
+        user_combo_counters: 当前用户画像组合对应的分组target热门计数器。
+        item_feature_counters: 当前历史item特征对应的target热门计数器。
         model_weight/pop_weight/cooccur_weight/user_weight: 各类信号的融合权重。
+        cooccur_decay: 历史共现的近因衰减系数，1.0表示不衰减。
         pop_penalty_weight: 热门惩罚权重，用于降低列表过度集中风险。
         history_soft_factor: soft过滤时历史item保留的分数比例。
 
@@ -439,10 +571,11 @@ def rank_items(
 
     if strategy in {"last_item", "history", "hybrid"}:
         history_items = recent_seq[-1:] if strategy == "last_item" else recent_seq
-        _add_cooccur_scores(scores, history_items, cooccur_stats, cooccur_weight)
+        _add_cooccur_scores(scores, history_items, cooccur_stats, cooccur_weight, cooccur_decay)
 
     _add_user_profile_scores(scores, user_profile_counters, user_weight)
     _add_user_profile_scores(scores, user_combo_counters, user_combo_weight)
+    _add_user_profile_scores(scores, item_feature_counters, item_feature_weight)
     _add_history_count_scores(scores, history_counts, history_count_weight)
 
     # 空历史或冷启动时，任何策略都用热门target兜底。

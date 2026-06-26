@@ -1888,3 +1888,417 @@ test-like 网格结果：
 - 下一次提交建议组合：
   - A1：沿用 Exp-019 的 C&S A1。
   - A2：使用组合画像 prior 新配置。
+
+---
+
+## Exp-022：A1 C&S + A2 用户画像组合 prior 线上提交
+
+日期：2026-06-26
+
+提交配置：
+
+- A1：
+  - 沿用 Exp-019 的 C&S A1。
+- A2：
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `history_filter=none`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.2`
+  - `user_combo_sizes=3,2,1`
+  - `user_combo_min_count=5`
+  - `history_count_weight=0`
+
+线上指标：
+
+- 提交时间：2026-06-26 14:47:17
+- 总分：`0.5808`
+- 分类任务分数：`0.6874`
+- 推荐任务分数：`0.4742`
+
+结论：
+
+- A1 与 Exp-019 一致：`0.6874`。
+- A2：
+  - Exp-019：`0.4647`
+  - Exp-022：`0.4742`
+  - 线上提升：`+0.0095`
+- 总分：
+  - Exp-019：`0.5760`
+  - Exp-022：`0.5808`
+  - 线上提升：`+0.0048`
+- test-like 验证和用户画像组合 prior 是有效方向。
+
+下一步：
+
+- 继续优化 A2。
+- 冷启动画像 prior 已有效，下一阶段重点转向 `len=1~3` 短历史用户。
+- 候选方向：item 类目转移，即用历史 item 的 `item.csv` 类目特征召回 target。
+
+---
+
+## Exp-023：A2 item 特征转移实验
+
+日期：2026-06-26
+
+目标：
+
+- 按 Exp-022 后的方向，验证 `item.csv` 中物品特征是否能帮助 `len=1~3` 短历史用户。
+- 思路：把测试用户历史 item 映射到 `i_cat_01/i_cat_02/i_bucket_01` 等物品特征，再用训练集统计“历史物品特征 -> target_iid”的转移热门度。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/a2_grid_search.py`
+- `framework/code/infer.py`
+- `framework/tests/test_rec_heuristics.py`
+
+修改内容：
+
+- 新增 `build_item_feature_transition_stats()` 和 `get_item_feature_counters()`。
+- `rank_items()` 支持 `item_feature_counters` 与 `item_feature_weight`。
+- A2 离线评估、网格搜索、正式推理均支持：
+  - `--item_feature_weight`
+  - `--item_feature_cols`
+  - `--item_feature_min_count`
+  - `--item_feature_recent_n`
+- 新增单元测试覆盖：
+  - 物品特征转移能返回同类目 target 计数器。
+  - 样本数不足的特征分组会被过滤。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_a1_correct_smooth framework.tests.test_a2_test_like_eval framework.tests.test_rec_heuristics -v
+python3 -m py_compile framework/code/rec_heuristics.py framework/code/a2_offline_eval.py framework/code/a2_grid_search.py framework/code/infer.py
+python3 framework/code/a2_grid_search.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --seq_cols item_seq_raw \
+  --recent_ns 3,5,10 \
+  --strategies history \
+  --history_filters none \
+  --user_weights 0.02 \
+  --user_combo_weights 0.2 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_min_count 5 \
+  --item_feature_weights 0,0.02,0.05,0.1,0.2,0.5 \
+  --item_feature_cols i_cat_01,i_cat_02,i_bucket_01 \
+  --item_feature_min_count 20 \
+  --pop_penalty_weights 0 \
+  --history_count_weights 0 \
+  --test_like_eval \
+  --sort_metric weighted_ndcg \
+  --top_results 30 \
+  --output_json framework/output/exp023_a2_item_feature_grid/results.json
+```
+
+本地指标：
+
+- 单元测试：13 项通过。
+- 语法检查：通过。
+- 最优结果仍为 `item_feature_weight=0`：
+  - `weighted_NDCG@10=0.479477`
+  - `NDCG@10=0.477359`
+- 加入物品特征后均略降，例如：
+  - `item_feature_weight=0.02`: `weighted_NDCG@10=0.479311`
+  - `item_feature_weight=0.05`: `weighted_NDCG@10=0.479281`
+
+线上指标：
+
+- 未提交。
+
+结论：
+
+- 不保留为提交配置。
+- 物品特征转移在当前规则融合中没有贡献，可能原因是 item 类别太粗，和现有热门/共现信号重复。
+
+是否保留：
+
+- 代码保留为可选开关，默认权重为 0，不影响既有提交配置。
+
+下一步：
+
+- 转向历史共现近因衰减，验证最近行为是否应比更早行为权重更高。
+
+---
+
+## Exp-024：A2 历史共现近因衰减
+
+日期：2026-06-26
+
+目标：
+
+- 改进 A2 `history` 策略。旧逻辑对最近 10 个历史 item 基本等权，而序列推荐中越近的行为通常越能解释下一个 target。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/a2_grid_search.py`
+- `framework/code/infer.py`
+- `framework/tests/test_rec_heuristics.py`
+
+修改内容：
+
+- `_add_cooccur_scores()` 新增 `decay` 参数。
+- `rank_items()` 新增 `cooccur_decay`，默认 `1.0`，完全兼容旧行为。
+- A2 离线评估、网格搜索、正式推理均支持：
+  - `--cooccur_decay`
+  - `--cooccur_decays`
+- 新增单元测试：较旧 item 共现计数更高、较新 item 共现计数略低时，开启衰减后应优先推荐最近 item 对应 target。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_a1_correct_smooth framework.tests.test_a2_test_like_eval framework.tests.test_rec_heuristics -v
+python3 -m py_compile framework/code/rec_heuristics.py framework/code/a2_offline_eval.py framework/code/a2_grid_search.py framework/code/infer.py
+python3 framework/code/a2_grid_search.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --seq_cols item_seq_raw \
+  --recent_ns 10 \
+  --cooccur_decays 1.0,0.995,0.99,0.985,0.98,0.975,0.97,0.965,0.96,0.955,0.95 \
+  --strategies history \
+  --history_filters none \
+  --user_weights 0.02 \
+  --user_combo_weights 0.2 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_min_count 5 \
+  --item_feature_weights 0 \
+  --pop_penalty_weights 0 \
+  --history_count_weights 0 \
+  --test_like_eval \
+  --sort_metric weighted_ndcg \
+  --top_results 20 \
+  --output_json framework/output/exp024_a2_cooccur_decay_refine/results.json
+```
+
+本地指标：
+
+- 单元测试：13 项通过。
+- 语法检查：通过。
+- Exp-022 对应离线配置：
+  - `cooccur_decay=1.0`
+  - `weighted_NDCG@10=0.479477`
+- 细化搜索最佳：
+  - `cooccur_decay=0.96`
+  - `weighted_NDCG@10=0.479857`
+  - `NDCG@10=0.477695`
+  - `Hit@10=0.722000`
+  - `MRR=0.401636`
+- 分桶对比：
+  - `len=0` 不变：`0.360740`
+  - `len=2-3`: `0.549062 -> 0.549230`
+  - `len>10`: `0.577841 -> 0.581059`
+
+线上指标：
+
+- 未提交。
+
+结论：
+
+- 保留为候选配置。收益很小，但方向稳定且不影响空历史用户。
+- 不建议单独为该小收益消耗提交次数，应与下一次 A1 或 A2 更大改动一起提交。
+
+是否保留：
+
+- 保留。
+
+下一步：
+
+- 微调用户画像组合 prior 权重。
+
+---
+
+## Exp-025：A2 用户画像 all 组合实验
+
+日期：2026-06-26
+
+目标：
+
+- 验证是否应把用户画像组合从前缀组合扩展为所有列组合。
+- 直觉：`user.csv` 有 8 个画像列，最有用的列不一定只在前几列。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/a2_grid_search.py`
+- `framework/code/infer.py`
+- `framework/tests/test_rec_heuristics.py`
+
+修改内容：
+
+- `build_user_combo_profile_stats()` 新增 `combo_mode`：
+  - `prefix`: 默认旧行为，只使用前缀组合。
+  - `all`: 枚举指定长度的所有列组合。
+- A2 离线评估、网格搜索、正式推理均支持：
+  - `--user_combo_mode prefix/all`
+- 新增单元测试：`all` 模式应能使用非前缀画像列。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 framework/code/a2_grid_search.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --seq_cols item_seq_raw \
+  --recent_ns 10 \
+  --cooccur_decays 1.0,0.96 \
+  --strategies history \
+  --history_filters none \
+  --user_weights 0.02 \
+  --user_combo_weights 0.02,0.05,0.1,0.2 \
+  --user_combo_sizes 2,1 \
+  --user_combo_mode all \
+  --user_combo_min_count 20 \
+  --item_feature_weights 0 \
+  --pop_penalty_weights 0 \
+  --history_count_weights 0 \
+  --test_like_eval \
+  --sort_metric weighted_ndcg \
+  --top_results 30 \
+  --output_json framework/output/exp025_a2_user_combo_all_grid/results_s2_s1_min20.json
+```
+
+本地指标：
+
+- 最佳 all 组合：
+  - `user_combo_mode=all`
+  - `user_combo_sizes=2,1`
+  - `user_combo_min_count=20`
+  - `user_combo_weight=0.1`
+  - `cooccur_decay=0.96`
+  - `weighted_NDCG@10=0.471957`
+- 明显低于当前 prefix 最优 `0.479857`。
+
+线上指标：
+
+- 未提交。
+
+结论：
+
+- 不采用 `all` 组合。它枚举了太多画像分组，平均融合后引入噪声并稀释有效先验。
+- 代码保留为可选模式，默认仍为 `prefix`。
+
+是否保留：
+
+- 仅保留可选参数，不作为提交配置。
+
+下一步：
+
+- 继续微调 prefix 组合。
+
+---
+
+## Exp-029：A2 共现衰减 + 用户组合权重微调候选
+
+日期：2026-06-26
+
+目标：
+
+- 在 Exp-022 有效配置上做小范围参数微调，形成下一次提交候选 A2。
+
+运行命令：
+
+```bash
+cd /home/aliagent
+python3 framework/code/a2_grid_search.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --seq_cols item_seq_raw \
+  --recent_ns 10 \
+  --cooccur_decays 0.96 \
+  --strategies history \
+  --history_filters none \
+  --user_weights 0,0.01,0.02,0.03,0.05 \
+  --user_combo_weights 0.18,0.2,0.22 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_mode prefix \
+  --user_combo_min_count 5 \
+  --item_feature_weights 0 \
+  --pop_penalty_weights 0 \
+  --history_count_weights 0 \
+  --test_like_eval \
+  --sort_metric weighted_ndcg \
+  --top_results 25 \
+  --output_json framework/output/exp029_a2_user_weight_grid/results.json
+```
+
+本地指标：
+
+- 最佳配置：
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `cooccur_decay=0.96`
+  - `rec_strategy=history`
+  - `history_filter=none`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.18`
+  - `user_combo_sizes=3,2,1`
+  - `user_combo_mode=prefix`
+  - `user_combo_min_count=5`
+  - `history_count_weight=0`
+- 指标：
+  - `weighted_NDCG@10=0.479879`
+  - `NDCG@10=0.477715`
+  - `Hit@10=0.721500`
+  - `MRR=0.401798`
+- 对比 Exp-022 离线配置：
+  - `weighted_NDCG@10=0.479477`
+  - 本地提升：`+0.000402`
+
+候选 A2 生成命令：
+
+```bash
+python3 framework/code/infer.py \
+  --task task2 \
+  --data_path framework/data/rec_data \
+  --output_path framework/output/exp029_a2_decay_combo018_smoke/A2.csv \
+  --rec_strategy history \
+  --seq_col item_seq_raw \
+  --recent_n 10 \
+  --cooccur_decay 0.96 \
+  --history_filter none \
+  --user_weight 0.02 \
+  --user_combo_weight 0.18 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_mode prefix \
+  --user_combo_min_count 5 \
+  --history_count_weight 0 \
+  --user_profile_cols auto \
+  --topk 10 \
+  --device cpu
+```
+
+格式检查：
+
+- `A2.csv` 通过格式校验。
+- 与 Exp-022 A2 相比，`1551 / 10000` 个用户推荐串发生变化，变化比例 `15.51%`。
+
+线上指标：
+
+- 尚未提交。
+
+结论：
+
+- 可作为下一次提交候选，但收益较小。
+- 更大的分数空间仍在 A1；后续应优先提升 A1 训练/集成。
+
+是否保留：
+
+- 保留为候选。

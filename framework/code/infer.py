@@ -32,12 +32,15 @@ from datasets import GraphDataset, RecDataset, load_rec_data
 from rec_heuristics import (
     build_cooccur_stats,
     build_global_popularity,
+    build_item_feature_transition_stats,
     build_user_combo_profile_stats,
     build_user_profile_stats,
     choose_seq_col,
+    get_item_feature_counters,
     get_user_combo_profile_counters,
     get_user_profile_counters,
     parse_item_counts,
+    parse_item_feature_cols,
     parse_seq,
     parse_user_profile_cols,
     rank_items,
@@ -97,14 +100,27 @@ def parse_args():
                         help='A2热门度分数融合权重')
     parser.add_argument('--cooccur_weight', type=float, default=1.0,
                         help='A2历史共现分数融合权重')
+    parser.add_argument('--cooccur_decay', type=float, default=1.0,
+                        help='A2历史共现近因衰减系数，1.0表示不衰减')
     parser.add_argument('--user_weight', type=float, default=0.0,
                         help='A2用户画像分组热门度融合权重')
     parser.add_argument('--user_combo_weight', type=float, default=0.0,
                         help='A2用户画像前缀组合热门度融合权重')
     parser.add_argument('--user_combo_sizes', type=str, default='3,2,1',
                         help='A2用户画像前缀组合长度')
+    parser.add_argument('--user_combo_mode', type=str, default='prefix',
+                        choices=['prefix', 'all'],
+                        help='A2用户画像组合模式: prefix=只用前缀组合，all=枚举所有指定长度组合')
     parser.add_argument('--user_combo_min_count', type=int, default=5,
                         help='A2画像组合最少训练样本数')
+    parser.add_argument('--item_feature_weight', type=float, default=0.0,
+                        help='A2物品特征转移热门度融合权重')
+    parser.add_argument('--item_feature_cols', type=str, default='auto',
+                        help='A2物品特征列，auto表示使用item.csv中除iid外全部列，空字符串表示关闭')
+    parser.add_argument('--item_feature_min_count', type=int, default=20,
+                        help='A2物品特征分组最少训练样本数')
+    parser.add_argument('--item_feature_recent_n', type=int, default=-1,
+                        help='A2物品特征转移使用最近多少个历史item；小于等于0时跟随recent_n')
     parser.add_argument('--history_count_weight', type=float, default=0.0,
                         help='A2当前用户历史item频次融合权重')
     parser.add_argument('--user_profile_cols', type=str, default='auto',
@@ -492,25 +508,51 @@ def infer_task2_v2(args):
                         user_df=user_df,
                         user_cols=user_cols,
                         combo_sizes=combo_sizes,
+                        combo_mode=args.user_combo_mode,
                         min_count=args.user_combo_min_count,
                         user_col=user_col,
                     )
                     logging.info(
-                        "启用用户画像组合融合: sizes=%s, min_count=%s, weight=%.3f",
-                        combo_sizes, args.user_combo_min_count, args.user_combo_weight,
+                        "启用用户画像组合融合: sizes=%s, mode=%s, min_count=%s, weight=%.3f",
+                        combo_sizes, args.user_combo_mode,
+                        args.user_combo_min_count, args.user_combo_weight,
                     )
             else:
                 logging.warning("启用用户画像融合，但未选择任何用户画像列，画像融合关闭")
         else:
             logging.warning("启用用户画像融合，但未找到user.csv，画像融合关闭")
 
+    item_feature_cols = []
+    item_lookup = None
+    item_feature_stats = None
+    item_feature_recent_n = args.recent_n if args.item_feature_recent_n <= 0 else args.item_feature_recent_n
+    if args.item_feature_weight > 0:
+        item_feature_cols = parse_item_feature_cols(item_df, args.item_feature_cols)
+        if item_feature_cols:
+            item_feature_stats, item_lookup = build_item_feature_transition_stats(
+                train_df=train_df,
+                item_df=item_df,
+                seq_col=train_seq_col,
+                feature_cols=item_feature_cols,
+                recent_n=item_feature_recent_n,
+                min_count=args.item_feature_min_count,
+            )
+            logging.info(
+                "启用物品特征转移融合: cols=%s, recent_n=%s, min_count=%s, weight=%.3f",
+                item_feature_cols, item_feature_recent_n,
+                args.item_feature_min_count, args.item_feature_weight,
+            )
+        else:
+            logging.warning("启用物品特征融合，但未选择任何物品特征列，物品特征融合关闭")
+
     logging.info(
         "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
-        "weights(model/pop/cooccur/user/user_combo/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f/%.3f, "
-        "pop_penalty=%.3f",
+        "weights(model/pop/cooccur/user/user_combo/item_feature/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f, "
+        "cooccur_decay=%.3f, pop_penalty=%.3f",
         args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
         args.model_weight, args.pop_weight, args.cooccur_weight, args.user_weight,
-        args.user_combo_weight, args.history_count_weight, args.pop_penalty_weight,
+        args.user_combo_weight, args.item_feature_weight, args.history_count_weight,
+        args.cooccur_decay, args.pop_penalty_weight,
     )
     logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
@@ -605,6 +647,14 @@ def infer_task2_v2(args):
             combo_profile_stats=user_combo_profile_stats,
             min_count=args.user_combo_min_count,
         )
+        item_feature_counters = get_item_feature_counters(
+            seq=items,
+            item_lookup=item_lookup,
+            item_feature_stats=item_feature_stats,
+            feature_cols=item_feature_cols,
+            recent_n=item_feature_recent_n,
+            min_count=args.item_feature_min_count,
+        )
         recs = rank_items(
             seq=items,
             candidate_items=candidate_items,
@@ -617,12 +667,15 @@ def infer_task2_v2(args):
             model_scores=model_scores,
             user_profile_counters=user_counters,
             user_combo_counters=user_combo_counters,
+            item_feature_counters=item_feature_counters,
             history_counts=parse_item_counts(row.get('item_seq_counts')),
             model_weight=args.model_weight,
             pop_weight=args.pop_weight,
             cooccur_weight=args.cooccur_weight,
+            cooccur_decay=args.cooccur_decay,
             user_weight=args.user_weight,
             user_combo_weight=args.user_combo_weight,
+            item_feature_weight=args.item_feature_weight,
             history_count_weight=args.history_count_weight,
             pop_penalty_weight=args.pop_penalty_weight,
         )
