@@ -2491,3 +2491,118 @@ python3 framework/code/a1_correct_smooth.py \
 - 训练多个 `gat_sparse` checkpoint。
 - 用 `a1_ensemble_eval.py` 比较 GCN/SAGE/GAT sparse 的混合集成。
 - 在最佳混合集成上重新跑普通 C&S 和伪标签 C&S。
+
+---
+
+## Exp-031：A1 稀疏 GAT 训练与混合集成评估
+
+日期：2026-06-26
+
+目标：
+
+- 验证 Tool-006 新增的 `gat_sparse` 是否能成为比 Exp-010 GCN/SAGE 更强的新模型族。
+- 将 GAT sparse 与已有 GCN/SAGE checkpoint 做混合集成评估。
+
+运行环境：
+
+- GPU 服务器。
+
+训练配置：
+
+- `model_type=gat_sparse`
+- `adj_format=sparse`
+- `normalize=none`
+- `num_layers=2`
+- `num_heads=4`
+- 搜索两组 hidden：
+  - `hidden_dim=256`
+  - `hidden_dim=384`
+
+用户返回结果：
+
+单模型固定验证集准确率：
+
+- `0.700457`：`exp031_a1_gat_sparse_h256_heads4_seed2026`
+- `0.696804`：`exp031_a1_gat_sparse_h256_heads4_seed3407`
+- `0.694977`：`exp031_a1_gat_sparse_h256_heads4_seed42`
+- `0.686758`：`exp031_a1_gat_sparse_h384_heads4_seed3407`
+- `0.684932`：`exp031_a1_gat_sparse_h384_heads4_seed42`
+- `0.682192`：`exp031_a1_gat_sparse_h384_heads4_seed777`
+- `0.677626`：Exp-010 最强 GCN
+
+等权 Top-K 集成结果：
+
+- Top-1：`0.700457`
+- Top-2：`0.695890`
+- Top-3：`0.694977`
+- Top-4：`0.689498`
+- Top-5：`0.689498`
+- Top-10：`0.693151`
+
+结论：
+
+- `gat_sparse_h256` 成功，单模型已经达到 `0.700457`，等于此前 Exp-010 Top-5 + C&S 的本地验证准确率。
+- `hidden_dim=384` 明显不如 `hidden_dim=256`，说明该模型族过大后可能过拟合或训练不稳定。
+- 等权集成无效，Top-K 平均会把最强 GAT 拉低。
+- 后续必须改用：
+  - 单模型 GAT + C&S / 伪标签 C&S。
+  - 贪心加权 ensemble，而不是 Top-K 等权平均。
+
+是否保留：
+
+- 保留 `gat_sparse_h256_heads4_seed2026` 作为当前 A1 最强单模型候选。
+
+下一步：
+
+- 跑 `a1_correct_smooth.py`，对最强 GAT 单模型搜索普通 C&S 与伪标签 C&S。
+- 跑 `a1_ensemble_eval.py --greedy_max_size`，做贪心加权集成搜索。
+
+---
+
+## Tool-007：A1 贪心加权集成评估
+
+日期：2026-06-26
+
+目标：
+
+- 解决 Exp-031 中“等权 Top-K 集成拉低最强模型”的问题。
+- 让 ensemble 只在验证集准确率真实提升时加入新模型，并搜索新模型权重。
+
+修改文件：
+
+- `framework/code/a1_ensemble_eval.py`
+- `framework/tests/test_a1_ensemble_eval.py`
+
+修改内容：
+
+- 新增 `greedy_weighted_ensemble()`：
+  - 从验证集最强单模型开始。
+  - 每一步尝试加入一个尚未选择的 checkpoint。
+  - 搜索新模型权重 `w`，融合公式：
+    - `new_logits = (1 - w) * current_logits + w * candidate_logits`
+  - 只有验证准确率提升超过 `--greedy_min_gain` 才接受。
+- `a1_ensemble_eval.py` 新增参数：
+  - `--greedy_max_size`
+  - `--greedy_weights`
+  - `--greedy_min_gain`
+- 新增测试：
+  - 互补模型应能通过加权融合提升准确率。
+  - 有害模型不能为了凑数量被加入。
+
+测试命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_a1_ensemble_eval framework.tests.test_models framework.tests.test_a1_correct_smooth -v
+python3 -m py_compile framework/code/a1_ensemble_eval.py framework/code/models.py framework/code/train.py framework/code/infer.py framework/code/a1_correct_smooth.py
+```
+
+测试结果：
+
+- 单元测试：8 项通过。
+- 语法检查：通过。
+
+结论：
+
+- 工具保留。
+- 下一步在 GPU 服务器上对 Exp010 + Exp031 checkpoint 跑贪心加权 ensemble。
