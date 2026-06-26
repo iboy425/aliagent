@@ -43,6 +43,8 @@ def parse_args():
                         help="A1.npz 数据路径")
     parser.add_argument("--checkpoints", type=str, nargs="+", required=True,
                         help="A1 checkpoint 列表，可传入多个做 logits 平均")
+    parser.add_argument("--checkpoint_weights", type=str, default="",
+                        help="逗号分隔的 checkpoint 权重；为空时使用等权平均")
     parser.add_argument("--device", type=str, default=None,
                         help="计算设备，如 cuda 或 cpu")
     parser.add_argument("--val_ratio", type=float, default=0.1,
@@ -105,6 +107,28 @@ def _parse_float_list(value: str) -> List[float]:
 def _parse_int_list(value: str) -> List[int]:
     """解析逗号分隔整数"""
     return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _parse_checkpoint_weights(value: str, count: int) -> List[float]:
+    """解析并归一化 checkpoint 权重
+
+    空字符串表示等权平均；显式传入时，权重数量必须和 checkpoint 数量一致。
+    """
+    if count <= 0:
+        raise ValueError("至少需要一个 checkpoint")
+    if not value:
+        return [1.0 / count for _ in range(count)]
+
+    weights = _parse_float_list(value)
+    if len(weights) != count:
+        raise ValueError("checkpoint 权重数量必须和 checkpoint 数量一致")
+    if any(weight < 0 for weight in weights):
+        raise ValueError("checkpoint 权重不能为负数")
+
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("checkpoint 权重总和必须大于0")
+    return [weight / total for weight in weights]
 
 
 def normalize_score_rows(scores: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -283,17 +307,24 @@ def _prepare_cs_adj(adj_raw, normalize_type: str, device: torch.device) -> torch
     return torch.FloatTensor(adj_raw).to(device)
 
 
-def _average_model_probs(data: Dict, checkpoints: Iterable[str], device: torch.device) -> torch.Tensor:
-    """计算多个 checkpoint 的平均预测概率"""
+def _average_model_probs(
+    data: Dict,
+    checkpoints: Iterable[str],
+    device: torch.device,
+    checkpoint_weights: str = "",
+) -> torch.Tensor:
+    """计算多个 checkpoint 的加权平均预测概率"""
     logits_sum: Optional[torch.Tensor] = None
     checkpoint_list = list(checkpoints)
+    weights = _parse_checkpoint_weights(checkpoint_weights, len(checkpoint_list))
     with torch.no_grad():
-        for ckpt_id, path in enumerate(checkpoint_list, start=1):
-            print(f"[模型推理] {ckpt_id}/{len(checkpoint_list)} {path}")
+        for ckpt_id, (path, weight) in enumerate(zip(checkpoint_list, weights), start=1):
+            print(f"[模型推理] {ckpt_id}/{len(checkpoint_list)} weight={weight:.6f} {path}")
             model, model_args = load_model_from_checkpoint(path, device)
             features, adj = _prepare_task1_tensors(data, model_args, device)
             logits = model(features, adj)
-            logits_sum = logits.detach().clone() if logits_sum is None else logits_sum + logits.detach()
+            weighted_logits = logits.detach() * weight
+            logits_sum = weighted_logits.clone() if logits_sum is None else logits_sum + weighted_logits
 
             del model, features, adj, logits
             if device.type == "cuda":
@@ -301,7 +332,7 @@ def _average_model_probs(data: Dict, checkpoints: Iterable[str], device: torch.d
 
     if logits_sum is None:
         raise ValueError("至少需要一个 checkpoint")
-    return F.softmax(logits_sum / len(checkpoint_list), dim=1)
+    return F.softmax(logits_sum, dim=1)
 
 
 def _score_accuracy(scores: torch.Tensor, labels: torch.Tensor, idx: np.ndarray, device: torch.device) -> float:
@@ -416,6 +447,10 @@ def run_search(
             "stratified_split": args.stratified_split,
             "cs_normalize": args.cs_normalize,
             "checkpoints": list(args.checkpoints),
+            "checkpoint_weights": _parse_checkpoint_weights(
+                args.checkpoint_weights,
+                len(args.checkpoints),
+            ),
         }
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -493,7 +528,7 @@ def main():
     device = get_device(args.device)
     data = GraphDataset.load(args.data_path)
 
-    model_probs = _average_model_probs(data, args.checkpoints, device)
+    model_probs = _average_model_probs(data, args.checkpoints, device, args.checkpoint_weights)
     labels = torch.LongTensor(data["labels"]).to(device)
     adj = _prepare_cs_adj(data["adj"], args.cs_normalize, device)
 

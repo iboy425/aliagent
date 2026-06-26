@@ -2606,3 +2606,98 @@ python3 -m py_compile framework/code/a1_ensemble_eval.py framework/code/models.p
 
 - 工具保留。
 - 下一步在 GPU 服务器上对 Exp010 + Exp031 checkpoint 跑贪心加权 ensemble。
+
+---
+
+## Exp-032：A1 贪心加权集成与 GAT 单模型 C&S
+
+日期：2026-06-26
+
+目标：
+
+- 验证 Exp-031 的结论：A1 不能简单等权堆模型，需要用验证集控制模型权重。
+- 在当前最强 `gat_sparse_h256_heads4_seed2026` 上搜索 Correct and Smooth 后处理。
+
+用户返回结果：
+
+贪心加权集成：
+
+- Step-1：
+  - `val_acc=0.700457`
+  - 加入 `exp031_a1_gat_sparse_h256_heads4_seed2026`
+  - 权重 `1.0`
+- Step-2：
+  - `val_acc=0.703196`
+  - 加入 `exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777`
+  - 新加入权重 `0.05`
+  - 最终权重：
+    - `exp031_a1_gat_sparse_h256_heads4_seed2026`: `0.95`
+    - `exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777`: `0.05`
+
+GAT 单模型 C&S：
+
+- 原始模型验证准确率：`0.700457`
+- C&S 最优验证准确率：`0.710502`
+- 最优参数：
+  - Correct：`alpha=0.3, iter=5, weight=0.0`
+  - Smooth：`alpha=0.7, iter=5, weight=0.75`
+- 伪标签参数没有带来额外提升，因为无伪标签配置和多组伪标签配置并列 `0.710502`。
+
+结论：
+
+- 当前 A1 最有效提升来自 `gat_sparse_h256` + Smooth 型 C&S。
+- Correct 阶段最佳权重为 `0.0`，说明训练残差传播没有额外帮助；核心是把训练标签作为锚点做标签平滑。
+- 伪标签目前不作为默认提交策略，因为验证集显示它没有贡献，且线上风险更高。
+- 贪心加权集成提升了原始 logits，但尚未和 C&S 联合验证。
+
+下一步：
+
+- 给 `a1_correct_smooth.py` 增加 `--checkpoint_weights`，让 `0.95/0.05` 加权 logits 能进入 C&S 搜索。
+- 对 `GAT 0.95 + GCN 0.05` 跑 C&S，如果验证准确率超过 `0.710502`，再生成下一版 A1；否则保持单 GAT + C&S。
+
+---
+
+## Tool-008：A1 C&S 支持 checkpoint 加权
+
+日期：2026-06-26
+
+目标：
+
+- 让 Exp-032 搜出的贪心加权 ensemble 可以继续接入 Correct and Smooth。
+- 避免把强 GAT 和弱模型等权平均，保留 `0.95/0.05` 这种小比例互补信号。
+
+修改文件：
+
+- `framework/code/a1_correct_smooth.py`
+- `framework/tests/test_a1_correct_smooth.py`
+
+修改内容：
+
+- 新增命令行参数 `--checkpoint_weights`：
+  - 为空时保持原有等权行为。
+  - 传入逗号分隔权重时，数量必须和 checkpoint 数量一致。
+  - 权重会自动归一化，例如 `95,5` 等价于 `0.95,0.05`。
+- `_average_model_probs()` 从固定等权 logits 平均改为加权 logits 平均。
+- JSON 结果中记录归一化后的 `checkpoint_weights`，便于复盘。
+- 新增单元测试：
+  - 显式权重归一化。
+  - 空权重退化为等权。
+  - 权重数量不匹配时报错。
+
+测试命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_a1_correct_smooth framework.tests.test_a1_ensemble_eval framework.tests.test_models -v
+python3 -m py_compile framework/code/a1_correct_smooth.py framework/code/a1_ensemble_eval.py framework/code/models.py framework/code/train.py framework/code/infer.py
+```
+
+测试结果：
+
+- 单元测试：11 项通过。
+- 语法检查：通过。
+
+结论：
+
+- 工具保留。
+- 下一步在 GPU 上运行 Exp-033：`GAT 0.95 + GCN 0.05 + C&S`。

@@ -11,6 +11,7 @@ if CODE_DIR not in sys.path:
     sys.path.insert(0, CODE_DIR)
 
 from a1_correct_smooth import (  # noqa: E402
+    _parse_checkpoint_weights,
     correct_predictions,
     normalize_score_rows,
     propagate_with_restart,
@@ -143,6 +144,23 @@ class CorrectSmoothTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(normalized[0], torch.tensor([0.5, 0.5])))
         self.assertTrue(torch.allclose(normalized[1], torch.tensor([2 / 3, 1 / 3])))
+
+    def test_parse_checkpoint_weights_normalizes_explicit_weights(self):
+        """显式checkpoint权重应按数量校验并归一化"""
+        weights = _parse_checkpoint_weights("95,5", 2)
+
+        self.assertEqual(weights, [0.95, 0.05])
+
+    def test_parse_checkpoint_weights_defaults_to_equal_weights(self):
+        """未提供checkpoint权重时应退化为等权平均"""
+        weights = _parse_checkpoint_weights("", 4)
+
+        self.assertEqual(weights, [0.25, 0.25, 0.25, 0.25])
+
+    def test_parse_checkpoint_weights_rejects_mismatched_count(self):
+        """权重数量必须和checkpoint数量一致，避免静默错配"""
+        with self.assertRaises(ValueError):
+            _parse_checkpoint_weights("0.8,0.2", 3)
 
 
 if __name__ == "__main__":
