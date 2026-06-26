@@ -118,6 +118,66 @@ def build_user_profile_stats(
     return stats, user_df.set_index(user_col)
 
 
+def _make_combo_key(row, cols: Sequence[str]) -> Optional[str]:
+    """把多列用户画像拼成组合key"""
+    values = []
+    for col in cols:
+        value = row.get(col)
+        if pd.isna(value):
+            return None
+        values.append(str(value))
+    return "|".join(values)
+
+
+def build_user_combo_profile_stats(
+    train_df: pd.DataFrame,
+    user_df: pd.DataFrame,
+    user_cols: Sequence[str],
+    combo_sizes: Sequence[int],
+    min_count: int = 5,
+    user_col: str = "uid",
+    target_col: str = "target_iid",
+) -> Tuple[Dict, pd.DataFrame]:
+    """统计用户画像前缀组合下的target热门度
+
+    单列画像信号较弱；前几列组合能更细地刻画冷启动用户。这里采用
+    “前缀组合”而不是任意列组合，避免组合数量爆炸。
+    """
+    specs = []
+    for size in combo_sizes:
+        size = int(size)
+        if 1 <= size <= len(user_cols):
+            spec = tuple(user_cols[:size])
+            if spec not in specs:
+                specs.append(spec)
+
+    stats = {spec: defaultdict(Counter) for spec in specs}
+    group_counts = {spec: Counter() for spec in specs}
+    if not specs:
+        return {"specs": [], "stats": stats, "group_counts": group_counts}, user_df.set_index(user_col)
+
+    feature_cols = [user_col] + sorted({col for spec in specs for col in spec})
+    merged = train_df[[user_col, target_col]].merge(
+        user_df[feature_cols], on=user_col, how="left"
+    )
+
+    for _, row in merged.iterrows():
+        target = str(row[target_col])
+        for spec in specs:
+            key = _make_combo_key(row, spec)
+            if key is None:
+                continue
+            stats[spec][key][target] += 1
+            group_counts[spec][key] += 1
+
+    return {
+        "specs": specs,
+        "stats": stats,
+        "group_counts": group_counts,
+        "min_count": min_count,
+    }, user_df.set_index(user_col)
+
+
 def get_user_profile_counters(
     user_id: str,
     user_lookup: Optional[pd.DataFrame],
@@ -137,6 +197,40 @@ def get_user_profile_counters(
         if pd.isna(value):
             continue
         counter = user_profile_stats.get(col, {}).get(str(value))
+        if counter:
+            counters.append(counter)
+    return counters
+
+
+def get_user_combo_profile_counters(
+    user_id: str,
+    user_lookup: Optional[pd.DataFrame],
+    combo_profile_stats: Optional[Mapping],
+    min_count: Optional[int] = None,
+) -> List[Counter]:
+    """获取用户画像组合对应的分组热门计数器
+
+    返回顺序按组合长度从大到小排列，让更细粒度组合先参与打分。
+    """
+    if user_lookup is None or not combo_profile_stats:
+        return []
+    if user_id not in user_lookup.index:
+        return []
+
+    row = user_lookup.loc[user_id]
+    specs = list(combo_profile_stats.get("specs", []))
+    stats = combo_profile_stats.get("stats", {})
+    group_counts = combo_profile_stats.get("group_counts", {})
+    threshold = combo_profile_stats.get("min_count", 1) if min_count is None else min_count
+
+    counters = []
+    for spec in sorted(specs, key=len, reverse=True):
+        key = _make_combo_key(row, spec)
+        if key is None:
+            continue
+        if group_counts.get(spec, {}).get(key, 0) < threshold:
+            continue
+        counter = stats.get(spec, {}).get(key)
         if counter:
             counters.append(counter)
     return counters
@@ -298,11 +392,13 @@ def rank_items(
     recent_n: int = 20,
     model_scores: Optional[Mapping[str, float]] = None,
     user_profile_counters: Optional[Sequence[Counter]] = None,
+    user_combo_counters: Optional[Sequence[Counter]] = None,
     history_counts: Optional[Counter] = None,
     model_weight: float = 1.0,
     pop_weight: float = 1.0,
     cooccur_weight: float = 1.0,
     user_weight: float = 0.0,
+    user_combo_weight: float = 0.0,
     history_count_weight: float = 0.0,
     pop_penalty_weight: float = 0.0,
     history_soft_factor: float = 0.5,
@@ -346,6 +442,7 @@ def rank_items(
         _add_cooccur_scores(scores, history_items, cooccur_stats, cooccur_weight)
 
     _add_user_profile_scores(scores, user_profile_counters, user_weight)
+    _add_user_profile_scores(scores, user_combo_counters, user_combo_weight)
     _add_history_count_scores(scores, history_counts, history_count_weight)
 
     # 空历史或冷启动时，任何策略都用热门target兜底。

@@ -1679,3 +1679,212 @@ CUDA_VISIBLE_DEVICES=0 python3 code/a1_correct_smooth.py \
 是否保留：
 
 - 保留。
+
+---
+
+## Exp-019：A1 C&S + 稳妥 A2 线上提交
+
+日期：2026-06-25
+
+提交文件：
+
+- `framework/output/exp019_submit_a1_cs_a2_best/prediction.zip`
+
+提交配置：
+
+- A1：
+  - 使用 Exp-010 Top-5 ensemble。
+  - C&S 参数：
+    - `cs_normalize=random_walk`
+    - `correct_alpha=0.3`
+    - `correct_iter=5`
+    - `correct_weight=0.0`
+    - `smooth_alpha=0.7`
+    - `smooth_iter=7`
+    - `smooth_weight=1.0`
+- A2：
+  - 使用线上验证过的稳妥启发式路线。
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `history_filter=none`
+  - `user_weight=0.02`
+  - `history_count_weight=0`
+
+线上指标：
+
+- 提交时间：2026-06-25 22:06:36
+- 总分：`0.5760`
+- 分类任务分数：`0.6874`
+- 推荐任务分数：`0.4647`
+
+结论：
+
+- A1：
+  - Exp-013 A1：`0.6790`
+  - Exp-019 A1：`0.6874`
+  - 线上提升：`+0.0084`
+  - C&S 有正收益，但线上提升低于本地 holdout 的 `+0.010959`。
+- A2：
+  - 仍为 `0.4647`，未提升。
+- 总分：
+  - Exp-013 总分：`0.5667`
+  - Exp-019 总分：`0.5760`
+  - 线上提升：`+0.0093`
+
+下一步：
+
+- A1 C&S 暂时收敛，不继续盲搜。
+- 优先处理 A2：
+  - 当前随机验证集和线上 test 分布差异大。
+  - 先实现按 test 历史长度分布加权的 A2 离线验证。
+  - 再针对 `len=0` 冷启动和 `len=1~3` 短历史用户做策略。
+
+---
+
+## Exp-020：A2 test-like 离线验证
+
+日期：2026-06-26
+
+目标：
+
+- 修正 A2 随机验证集与线上 test 分布不一致的问题。
+- 线上 test 中空历史和短历史用户占比很高，普通随机验证会高估长历史共现策略。
+
+修改文件：
+
+- `framework/code/a2_offline_eval.py`
+  - 新增 `compute_bucket_weights()`。
+  - 新增 `truncate_history_fields()`。
+  - 新增 `apply_test_like_history_distribution()`。
+  - 新增 `add_weighted_metrics()`。
+  - 支持 `--test_like_eval` 和 `--sort_metric weighted_ndcg`。
+- `framework/code/a2_grid_search.py`
+  - 支持 test-like 截断验证和按 `weighted_ndcg` 排序。
+- `framework/tests/test_a2_test_like_eval.py`
+  - 覆盖桶权重、历史截断、`item_seq_counts` 同步截断、加权指标。
+
+原理说明：
+
+- test 的 `item_seq_raw` 长度分布：
+  - `len=0`: `0.3515`
+  - `len=1`: `0.1003`
+  - `len=2-3`: `0.4474`
+  - `len=4-10`: `0.0061`
+  - `len>10`: `0.0947`
+- 训练集随机验证大多是长历史用户，不符合线上分布。
+- test-like 验证会从 test 长度分布抽样，把验证样本历史截断到对应长度。
+- 截断历史时同步重写 `item_seq_counts`，避免频次字段偷看完整历史。
+
+旧 A2 稳妥策略 test-like 指标：
+
+- 配置：
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `user_weight=0.02`
+  - `history_count_weight=0`
+- 指标：
+  - `NDCG@10=0.466722`
+  - `weighted_NDCG@10=0.469048`
+  - `Hit@10=0.712000`
+  - `MRR=0.390515`
+- 分桶：
+  - `len=0`: `ndcg=0.331765`
+  - `len=1`: `ndcg=0.489303`
+  - `len=2-3`: `ndcg=0.548932`
+  - `len=4-10`: `ndcg=0.481965`
+  - `len>10`: `ndcg=0.578922`
+
+结论：
+
+- A2 最大短板是 `len=0` 冷启动用户。
+- 下一步优先增强用户画像 prior，而不是继续训练 GRU/SASRec。
+
+是否保留：
+
+- 保留。
+
+---
+
+## Exp-021：A2 用户画像组合 prior
+
+日期：2026-06-26
+
+目标：
+
+- 提升 A2 冷启动用户表现。
+- 在单列用户画像统计之外，加入前缀组合画像统计。
+
+数据诊断：
+
+- `user.csv` 有 8 个画像列。
+- 前缀组合覆盖与稀疏度：
+  - 前 1 列：训练组 `65`，中位样本数 `285`
+  - 前 2 列：训练组 `127`，中位样本数 `182`
+  - 前 3 列：训练组 `663`，中位样本数 `16`，test 覆盖 `0.9994`
+  - 前 4 列：训练组 `7750`，中位样本数 `2`，已经偏稀疏
+- 因此采用 `3,2,1` 前缀组合，并设置 `min_count=5`。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+  - 新增 `build_user_combo_profile_stats()`。
+  - 新增 `get_user_combo_profile_counters()`。
+  - `rank_items()` 新增 `user_combo_counters` 和 `user_combo_weight`。
+- `framework/code/a2_offline_eval.py`
+  - 支持 `--user_combo_weight`、`--user_combo_sizes`、`--user_combo_min_count`。
+- `framework/code/a2_grid_search.py`
+  - 支持组合画像权重搜索。
+- `framework/code/infer.py`
+  - 正式推理支持组合画像 prior。
+- `framework/tests/test_rec_heuristics.py`
+  - 覆盖组合画像计数和 `min_count` 过滤。
+
+test-like 网格结果：
+
+- 旧稳妥配置：
+  - `weighted_NDCG@10=0.469048`
+- 新最佳配置：
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.2`
+  - `user_combo_sizes=3,2,1`
+  - `user_combo_min_count=5`
+  - `history_count_weight=0`
+  - `weighted_NDCG@10=0.479477`
+- test-like 离线提升：
+  - `+0.010429`
+
+新配置分桶指标：
+
+- `len=0`: `ndcg=0.360740`
+- `len=1`: `ndcg=0.492172`
+- `len=2-3`: `ndcg=0.549062`
+- `len=4-10`: `ndcg=0.481965`
+- `len>10`: `ndcg=0.577841`
+
+与旧配置对比：
+
+- `len=0`: `0.331765 -> 0.360740`，提升 `+0.028975`
+- 主要收益来自冷启动用户，符合线上 test 分布。
+
+验证：
+
+- 单元测试：10 个测试全部通过。
+- 语法检查：通过。
+- 正式 A2 推理 smoke test：生成 10000 行 `A2.csv` 成功。
+- 提交格式校验：通过。
+
+线上指标：
+
+- 尚未提交。
+
+结论：
+
+- 保留。该改动针对线上占比最高的 `len=0` 冷启动用户，离线 test-like 指标提升明显。
+- 下一次提交建议组合：
+  - A1：沿用 Exp-019 的 C&S A1。
+  - A2：使用组合画像 prior 新配置。

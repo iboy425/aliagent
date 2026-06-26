@@ -32,8 +32,10 @@ from datasets import GraphDataset, RecDataset, load_rec_data
 from rec_heuristics import (
     build_cooccur_stats,
     build_global_popularity,
+    build_user_combo_profile_stats,
     build_user_profile_stats,
     choose_seq_col,
+    get_user_combo_profile_counters,
     get_user_profile_counters,
     parse_item_counts,
     parse_seq,
@@ -97,6 +99,12 @@ def parse_args():
                         help='A2历史共现分数融合权重')
     parser.add_argument('--user_weight', type=float, default=0.0,
                         help='A2用户画像分组热门度融合权重')
+    parser.add_argument('--user_combo_weight', type=float, default=0.0,
+                        help='A2用户画像前缀组合热门度融合权重')
+    parser.add_argument('--user_combo_sizes', type=str, default='3,2,1',
+                        help='A2用户画像前缀组合长度')
+    parser.add_argument('--user_combo_min_count', type=int, default=5,
+                        help='A2画像组合最少训练样本数')
     parser.add_argument('--history_count_weight', type=float, default=0.0,
                         help='A2当前用户历史item频次融合权重')
     parser.add_argument('--user_profile_cols', type=str, default='auto',
@@ -460,31 +468,49 @@ def infer_task2_v2(args):
     user_cols = []
     user_lookup = None
     user_profile_stats = None
+    user_combo_profile_stats = None
     user_path = f'{args.data_path}/user.csv'
-    if args.user_weight > 0:
+    if args.user_weight > 0 or args.user_combo_weight > 0:
         if os.path.exists(user_path):
             user_df = pd.read_csv(user_path)
             user_cols = parse_user_profile_cols(user_df, user_col, args.user_profile_cols)
             if user_cols:
-                user_profile_stats, user_lookup = build_user_profile_stats(
-                    train_df=train_df,
-                    user_df=user_df,
-                    user_cols=user_cols,
-                    user_col=user_col,
-                )
-                logging.info(f"启用用户画像融合: cols={user_cols}, weight={args.user_weight:.3f}")
+                if args.user_weight > 0:
+                    user_profile_stats, user_lookup = build_user_profile_stats(
+                        train_df=train_df,
+                        user_df=user_df,
+                        user_cols=user_cols,
+                        user_col=user_col,
+                    )
+                    logging.info(f"启用用户画像单列融合: cols={user_cols}, weight={args.user_weight:.3f}")
+                else:
+                    user_lookup = user_df.set_index(user_col)
+                if args.user_combo_weight > 0:
+                    combo_sizes = [int(x.strip()) for x in args.user_combo_sizes.split(',') if x.strip()]
+                    user_combo_profile_stats, user_lookup = build_user_combo_profile_stats(
+                        train_df=train_df,
+                        user_df=user_df,
+                        user_cols=user_cols,
+                        combo_sizes=combo_sizes,
+                        min_count=args.user_combo_min_count,
+                        user_col=user_col,
+                    )
+                    logging.info(
+                        "启用用户画像组合融合: sizes=%s, min_count=%s, weight=%.3f",
+                        combo_sizes, args.user_combo_min_count, args.user_combo_weight,
+                    )
             else:
-                logging.warning("user_weight>0，但未选择任何用户画像列，画像融合关闭")
+                logging.warning("启用用户画像融合，但未选择任何用户画像列，画像融合关闭")
         else:
-            logging.warning("user_weight>0，但未找到user.csv，画像融合关闭")
+            logging.warning("启用用户画像融合，但未找到user.csv，画像融合关闭")
 
     logging.info(
         "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
-        "weights(model/pop/cooccur/user/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f, "
+        "weights(model/pop/cooccur/user/user_combo/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f/%.3f, "
         "pop_penalty=%.3f",
         args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
         args.model_weight, args.pop_weight, args.cooccur_weight, args.user_weight,
-        args.history_count_weight, args.pop_penalty_weight,
+        args.user_combo_weight, args.history_count_weight, args.pop_penalty_weight,
     )
     logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
@@ -573,6 +599,12 @@ def infer_task2_v2(args):
             user_profile_stats=user_profile_stats,
             user_cols=user_cols,
         )
+        user_combo_counters = get_user_combo_profile_counters(
+            user_id=user_id,
+            user_lookup=user_lookup,
+            combo_profile_stats=user_combo_profile_stats,
+            min_count=args.user_combo_min_count,
+        )
         recs = rank_items(
             seq=items,
             candidate_items=candidate_items,
@@ -584,11 +616,13 @@ def infer_task2_v2(args):
             recent_n=args.recent_n,
             model_scores=model_scores,
             user_profile_counters=user_counters,
+            user_combo_counters=user_combo_counters,
             history_counts=parse_item_counts(row.get('item_seq_counts')),
             model_weight=args.model_weight,
             pop_weight=args.pop_weight,
             cooccur_weight=args.cooccur_weight,
             user_weight=args.user_weight,
+            user_combo_weight=args.user_combo_weight,
             history_count_weight=args.history_count_weight,
             pop_penalty_weight=args.pop_penalty_weight,
         )
