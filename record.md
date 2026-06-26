@@ -2760,3 +2760,123 @@ python3 -m py_compile framework/code/a1_correct_smooth.py framework/code/a1_ense
 
 - 生成 `exp034_submit_a1_weighted_cs_a2_exp030/prediction.zip`，A1 使用 Exp-033，A2 沿用 Exp-030。
 - 如果当天提交次数紧张，优先继续跑 A2 或更强 A1 模型，再决定是否提交。
+
+---
+
+## Exp-035/037：A2 冷启动用户画像探查
+
+日期：2026-06-26
+
+目标：
+
+- 只剩一次提交机会，不能再为 A2 小权重微调消耗提交。
+- 先诊断 A2 当前瓶颈，重点看测试集中占比很高的空历史/短历史用户。
+
+数据诊断：
+
+- 训练用户数：`40000`
+- 测试用户数：`10000`
+- 训练/测试用户重叠：`0`
+- 测试 `item_seq_raw` 历史长度分布：
+  - 空历史：`3515 / 10000`
+  - 长度 1：`1003 / 10000`
+  - 长度 2-3：`4474 / 10000`
+  - 长度 4-10：`61 / 10000`
+  - 长度 >10：`947 / 10000`
+
+结论：
+
+- A2 不是记住老用户，而是对新用户做短历史/冷启动推荐。
+- 空历史用户完全没有 item 序列，共现特征不可用，只能依赖用户画像和全局热门。
+
+运行实验：
+
+- `exp035_a2_user_combo_long_prefix`：
+  - 将用户画像组合从 `3,2,1` 扩展到 `5,4,3,2,1`
+  - 将 `user_combo_min_count` 降到 `3`
+  - 搜索多个 `user_weight` 和 `user_combo_weight`
+
+本地结果：
+
+- 最佳 `weighted_NDCG@10=0.477944`
+- 低于 Exp-029/030 当前 A2 候选 `0.479879`
+
+结论：
+
+- 更长、更细的用户画像前缀组合引入噪声，没有提升。
+- A2 冷启动靠画像继续细分的空间有限，当前最后一次提交不应押注该方向。
+
+是否保留：
+
+- 不作为提交配置。
+- 不删除代码，因为 `prefix/all` 组合仍是可复现实验能力。
+
+---
+
+## Tool-009：A1 Exp-038 稀疏 GAT GPU 网格脚本
+
+日期：2026-06-26
+
+目标：
+
+- 在只剩一次提交机会的情况下，寻找比 Exp-033 更明显的 A1 提升。
+- 不再继续微调已经平台化的 A2 小权重，而是扩大 `gat_sparse` 的有效配置搜索。
+
+修改文件：
+
+- `framework/scripts/run_exp038_a1_gat_grid.sh`
+
+脚本逻辑：
+
+- 基于 Exp-031 的有效经验固定：
+  - `model_type=gat_sparse`
+  - `num_layers=2`
+  - `normalize=none`
+  - `adj_format=sparse`
+  - `feature_norm=none`
+  - `class_weight=none`
+  - `val_ratio=0.1`
+  - `split_seed=42`
+  - `stratified_split`
+- 搜索低风险邻域：
+  - `hidden_dim=224/256/288`
+  - `heads=4`
+  - `dropout=0.40/0.45/0.50`
+  - `lr=0.003/0.005`
+  - seeds：`42/777/2026/3407`
+- 少量探索多头模型：
+  - `hidden_dim=256, heads=8`
+  - `hidden_dim=320, heads=8`
+  - seeds：`2026/3407`
+- 每个配置保存到独立目录。
+- 若目录下已有 `best_model.pt`，自动跳过，方便中断后续跑。
+- 训练完成后自动运行 `a1_ensemble_eval.py`：
+  - 单模型排序
+  - Top-K 等权集成
+  - 贪心加权集成
+
+验证：
+
+```bash
+cd /home/aliagent
+bash -n framework/scripts/run_exp038_a1_gat_grid.sh
+```
+
+验证结果：
+
+- Shell 语法检查通过。
+
+下一步：
+
+- 在 GPU 服务器运行：
+
+```bash
+cd /home/aliagent
+git pull --ff-only
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/run_exp038_a1_gat_grid.sh
+```
+
+- 目标：
+  - 找到原始验证准确率超过 `0.71` 的单模型。
+  - 或找到贪心加权 ensemble 明显超过 Exp-033 原始 `0.703196` 的组合。
