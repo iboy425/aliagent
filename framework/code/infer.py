@@ -148,13 +148,14 @@ def load_model_from_checkpoint(checkpoint_path, device):
     task = args_dict.get('task', 'task1')
     model_type = args_dict.get('model_type', 'sage')
 
-    if task == 'task1' or model_type in ['gcn', 'sage', 'gat']:
+    if task == 'task1' or model_type in ['gcn', 'sage', 'gat', 'gat_sparse']:
         # GNN分类器
         num_features = args_dict.get('num_features', 767)
         num_classes = args_dict.get('num_classes', 10)
         hidden_dim = args_dict.get('hidden_dim', 128)
         num_layers = args_dict.get('num_layers', 2)
         dropout = args_dict.get('dropout', 0.5)
+        gat_heads = args_dict.get('num_heads', args_dict.get('gat_heads', 4))
 
         # 如果args_dict中没有,尝试从数据推断
         if num_features == 767 and num_classes == 10:
@@ -166,7 +167,8 @@ def load_model_from_checkpoint(checkpoint_path, device):
             num_classes=num_classes,
             num_layers=num_layers,
             dropout=dropout,
-            model_type=model_type
+            model_type=model_type,
+            gat_heads=gat_heads,
         )
     else:
         # 序列推荐模型
@@ -228,7 +230,7 @@ def _prepare_task1_tensors(data, model_args, device):
     else:
         features = torch.FloatTensor(features_raw).to(device)
 
-    use_sparse_adj = adj_format == 'sparse' and model_type == 'gcn'
+    use_sparse_adj = adj_format == 'sparse' and model_type in {'gcn', 'gat_sparse'}
     if normalize_type == 'symmetric':
         adj = normalize_adj_sparse(data['adj'], device=device) if use_sparse_adj else normalize_adj(data['adj']).to(device)
     elif normalize_type == 'random_walk':

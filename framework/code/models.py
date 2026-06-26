@@ -107,6 +107,107 @@ class GATLayer(nn.Module):
         return F.elu(h_prime)
 
 
+class SparseGATLayer(nn.Module):
+    """稀疏GAT层 - 只在真实边上计算注意力
+
+    原 baseline 的 GAT 会构造 `N x N` 注意力矩阵，节点数 13k 时既慢又
+    容易显存爆炸。这里根据稀疏邻接矩阵中的边计算注意力，复杂度从
+    O(N^2) 降到 O(E)，更符合图注意力网络的实际用法。
+    """
+
+    def __init__(self, in_dim, out_dim, heads=4, dropout=0.6, alpha=0.2, concat=True):
+        super().__init__()
+        if heads <= 0:
+            raise ValueError("heads必须为正整数")
+        if concat and out_dim % heads != 0:
+            raise ValueError(f"concat模式下out_dim必须能被heads整除: out_dim={out_dim}, heads={heads}")
+
+        self.out_dim = out_dim
+        self.heads = heads
+        self.concat = concat
+        self.head_dim = out_dim // heads if concat else out_dim
+        self.dropout = dropout
+
+        self.linear = nn.Linear(in_dim, self.heads * self.head_dim, bias=False)
+        self.attn_src = nn.Parameter(torch.empty(self.heads, self.head_dim))
+        self.attn_dst = nn.Parameter(torch.empty(self.heads, self.head_dim))
+        self.bias = nn.Parameter(torch.zeros(out_dim))
+        self.leakyrelu = nn.LeakyReLU(alpha)
+
+        nn.init.xavier_uniform_(self.linear.weight)
+        nn.init.xavier_uniform_(self.attn_src)
+        nn.init.xavier_uniform_(self.attn_dst)
+
+    @staticmethod
+    def _edge_index_from_adj(adj, num_nodes, device):
+        """从邻接矩阵提取边，并补自环
+
+        约定：`adj[row, col]` 表示节点 row 聚合节点 col 的信息，因此
+        row 是目标节点，col 是源节点。
+        """
+        if adj.is_sparse:
+            idx = adj.coalesce().indices()
+            target, source = idx[0], idx[1]
+        else:
+            target, source = torch.nonzero(adj > 0, as_tuple=True)
+
+        loops = torch.arange(num_nodes, device=device)
+        edge_index = torch.stack([
+            torch.cat([target.to(device), loops]),
+            torch.cat([source.to(device), loops]),
+        ], dim=0)
+        return torch.unique(edge_index, dim=1)
+
+    @staticmethod
+    def _edge_softmax(scores, target, num_nodes):
+        """按目标节点对入边注意力做softmax"""
+        heads = scores.size(1)
+        index = target.unsqueeze(1).expand(-1, heads)
+
+        max_per_node = torch.full(
+            (num_nodes, heads),
+            -torch.inf,
+            dtype=scores.dtype,
+            device=scores.device,
+        )
+        max_per_node.scatter_reduce_(0, index, scores, reduce="amax", include_self=True)
+        exp_scores = torch.exp(scores - max_per_node[target])
+
+        denom = torch.zeros((num_nodes, heads), dtype=scores.dtype, device=scores.device)
+        denom.scatter_add_(0, index, exp_scores)
+        return exp_scores / denom[target].clamp(min=1e-12)
+
+    def forward(self, x, adj):
+        """前向传播"""
+        num_nodes = x.size(0)
+        edge_index = self._edge_index_from_adj(adj, num_nodes, x.device)
+        target, source = edge_index[0], edge_index[1]
+
+        h = self.linear(x).view(num_nodes, self.heads, self.head_dim)
+        src_h = h[source]
+        dst_h = h[target]
+        scores = self.leakyrelu(
+            (src_h * self.attn_src.unsqueeze(0)).sum(dim=-1)
+            + (dst_h * self.attn_dst.unsqueeze(0)).sum(dim=-1)
+        )
+        alpha = self._edge_softmax(scores, target, num_nodes)
+        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+
+        messages = src_h * alpha.unsqueeze(-1)
+        out = torch.zeros(
+            (num_nodes, self.heads, self.head_dim),
+            dtype=messages.dtype,
+            device=messages.device,
+        )
+        out.scatter_add_(0, target.view(-1, 1, 1).expand(-1, self.heads, self.head_dim), messages)
+
+        if self.concat:
+            out = out.reshape(num_nodes, self.heads * self.head_dim)
+        else:
+            out = out.mean(dim=1)
+        return out + self.bias
+
+
 # ===== GNN分类器 =====
 
 class GNNClassifier(nn.Module):
@@ -119,10 +220,11 @@ class GNNClassifier(nn.Module):
     - dropout: Dropout率
     """
     def __init__(self, in_dim, hidden_dim, num_classes, num_layers=2,
-                 dropout=0.5, model_type="sage"):
+                 dropout=0.5, model_type="sage", gat_heads=4):
         super().__init__()
         self.model_type = model_type
         self.num_layers = num_layers
+        self.gat_heads = gat_heads
         self.dropout = nn.Dropout(dropout)
 
         # 构建GNN层
@@ -134,6 +236,14 @@ class GNNClassifier(nn.Module):
                 self.layers.append(GCNLayer(in_d, out_d))
             elif model_type == "gat":
                 self.layers.append(GATLayer(in_d, out_d, dropout=dropout))
+            elif model_type == "gat_sparse":
+                self.layers.append(SparseGATLayer(
+                    in_d,
+                    out_d,
+                    heads=gat_heads,
+                    dropout=dropout,
+                    concat=i < num_layers - 1,
+                ))
             else:  # sage or default
                 self.layers.append(SAGELayer(in_d, out_d))
 

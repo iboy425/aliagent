@@ -68,6 +68,10 @@ def parse_args():
                         help="Smooth 阶段传播轮数列表")
     parser.add_argument("--smooth_weights", type=str, default="0,0.25,0.5,0.75,1.0",
                         help="Smooth 预测融合权重列表")
+    parser.add_argument("--pseudo_thresholds", type=str, default="",
+                        help="伪标签置信度阈值列表；空字符串表示搜索时关闭伪标签")
+    parser.add_argument("--pseudo_weights", type=str, default="0.5,1.0",
+                        help="伪标签软锚点权重列表")
 
     # 推理参数。若 output_path 存在但未显式指定，则使用搜索得到的最佳参数。
     parser.add_argument("--correct_alpha", type=float, default=None,
@@ -82,6 +86,10 @@ def parse_args():
                         help="推理使用的 Smooth 传播轮数")
     parser.add_argument("--smooth_weight", type=float, default=None,
                         help="推理使用的 Smooth 预测融合权重")
+    parser.add_argument("--pseudo_threshold", type=float, default=None,
+                        help="推理使用的伪标签置信度阈值；不提供则按搜索最佳或关闭")
+    parser.add_argument("--pseudo_weight", type=float, default=None,
+                        help="推理使用的伪标签软锚点权重")
     parser.add_argument("--output_path", type=str, default="",
                         help="若提供，则生成 A1.csv")
     parser.add_argument("--output_json", type=str, default="",
@@ -170,6 +178,9 @@ def smooth_predictions(
     alpha: float,
     num_iter: int,
     smooth_weight: float,
+    pseudo_idx: Optional[torch.Tensor] = None,
+    pseudo_labels: Optional[torch.Tensor] = None,
+    pseudo_weight: float = 0.0,
 ) -> torch.Tensor:
     """Smooth 阶段：以训练标签为锚点平滑预测概率"""
     num_nodes, num_classes = corrected_probs.shape
@@ -177,6 +188,18 @@ def smooth_predictions(
 
     smooth_seed = corrected_probs.clone()
     smooth_seed[train_idx] = label_onehot[train_idx]
+    if (
+        pseudo_idx is not None
+        and pseudo_labels is not None
+        and pseudo_weight > 0
+        and len(pseudo_idx) > 0
+    ):
+        pseudo_onehot = F.one_hot(pseudo_labels, num_classes=num_classes).float()
+        old_seed = smooth_seed[pseudo_idx]
+        smooth_seed[pseudo_idx] = (
+            (1.0 - pseudo_weight) * old_seed
+            + pseudo_weight * pseudo_onehot
+        )
     propagated = propagate_with_restart(adj, smooth_seed, alpha=alpha, num_iter=num_iter)
 
     smoothed = (1.0 - smooth_weight) * corrected_probs + smooth_weight * propagated
@@ -189,6 +212,8 @@ def correct_and_smooth(
     train_idx: torch.Tensor,
     adj: torch.Tensor,
     params: Dict,
+    pseudo_idx: Optional[torch.Tensor] = None,
+    pseudo_labels: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """执行完整 Correct and Smooth 流程"""
     corrected = correct_predictions(
@@ -208,7 +233,32 @@ def correct_and_smooth(
         alpha=params["smooth_alpha"],
         num_iter=params["smooth_iter"],
         smooth_weight=params["smooth_weight"],
+        pseudo_idx=pseudo_idx,
+        pseudo_labels=pseudo_labels,
+        pseudo_weight=params.get("pseudo_weight", 0.0) or 0.0,
     )
+
+
+def build_pseudo_labels(
+    model_probs: torch.Tensor,
+    candidate_idx: np.ndarray,
+    threshold: Optional[float],
+    device: torch.device,
+) -> Sequence[torch.Tensor]:
+    """根据模型置信度选择伪标签节点"""
+    if threshold is None:
+        empty_idx = torch.LongTensor([]).to(device)
+        empty_labels = torch.LongTensor([]).to(device)
+        return empty_idx, empty_labels
+
+    candidate_t = torch.LongTensor(candidate_idx).to(device)
+    if len(candidate_t) == 0:
+        empty_labels = torch.LongTensor([]).to(device)
+        return candidate_t, empty_labels
+
+    conf, pred = model_probs[candidate_t].max(dim=1)
+    keep = conf >= threshold
+    return candidate_t[keep], pred[keep]
 
 
 def _split_indices(data: Dict, args) -> Sequence[np.ndarray]:
@@ -262,20 +312,32 @@ def _score_accuracy(scores: torch.Tensor, labels: torch.Tensor, idx: np.ndarray,
 
 def _iter_param_grid(args):
     """遍历 C&S 参数网格"""
+    pseudo_thresholds = [None]
+    if args.pseudo_thresholds:
+        pseudo_thresholds = [None] + _parse_float_list(args.pseudo_thresholds)
+    pseudo_weights = [0.0] if pseudo_thresholds == [None] else [0.0] + _parse_float_list(args.pseudo_weights)
     for correct_alpha in _parse_float_list(args.correct_alphas):
         for correct_iter in _parse_int_list(args.correct_iters):
             for correct_weight in _parse_float_list(args.correct_weights):
                 for smooth_alpha in _parse_float_list(args.smooth_alphas):
                     for smooth_iter in _parse_int_list(args.smooth_iters):
                         for smooth_weight in _parse_float_list(args.smooth_weights):
-                            yield {
-                                "correct_alpha": correct_alpha,
-                                "correct_iter": correct_iter,
-                                "correct_weight": correct_weight,
-                                "smooth_alpha": smooth_alpha,
-                                "smooth_iter": smooth_iter,
-                                "smooth_weight": smooth_weight,
-                            }
+                            for pseudo_threshold in pseudo_thresholds:
+                                for pseudo_weight in pseudo_weights:
+                                    if pseudo_threshold is None and pseudo_weight > 0:
+                                        continue
+                                    if pseudo_threshold is not None and pseudo_weight <= 0:
+                                        continue
+                                    yield {
+                                        "correct_alpha": correct_alpha,
+                                        "correct_iter": correct_iter,
+                                        "correct_weight": correct_weight,
+                                        "smooth_alpha": smooth_alpha,
+                                        "smooth_iter": smooth_iter,
+                                        "smooth_weight": smooth_weight,
+                                        "pseudo_threshold": pseudo_threshold,
+                                        "pseudo_weight": pseudo_weight if pseudo_threshold is not None else 0.0,
+                                    }
 
 
 def run_search(
@@ -289,6 +351,11 @@ def run_search(
     """在固定验证集上搜索 C&S 参数"""
     fit_idx, val_idx = _split_indices(data, args)
     fit_idx_t = torch.LongTensor(fit_idx).to(device)
+    pseudo_candidate_idx = np.setdiff1d(
+        np.arange(data["labels"].shape[0]),
+        fit_idx,
+        assume_unique=False,
+    )
 
     baseline_acc = _score_accuracy(model_probs, labels, val_idx, device)
     rows = [{
@@ -300,20 +367,32 @@ def run_search(
         "smooth_alpha": None,
         "smooth_iter": None,
         "smooth_weight": 0.0,
+        "pseudo_threshold": None,
+        "pseudo_weight": 0.0,
+        "pseudo_count": 0,
     }]
     print(f"\n模型原始验证准确率: {baseline_acc:.6f}")
 
     for params in _iter_param_grid(args):
+        pseudo_idx, pseudo_labels = build_pseudo_labels(
+            model_probs=model_probs,
+            candidate_idx=pseudo_candidate_idx,
+            threshold=params.get("pseudo_threshold"),
+            device=device,
+        )
         scores = correct_and_smooth(
             model_probs=model_probs,
             labels=labels,
             train_idx=fit_idx_t,
             adj=adj,
             params=params,
+            pseudo_idx=pseudo_idx,
+            pseudo_labels=pseudo_labels,
         )
         val_acc = _score_accuracy(scores, labels, val_idx, device)
         row = {"kind": "correct_smooth", "val_acc": val_acc}
         row.update(params)
+        row["pseudo_count"] = int(len(pseudo_idx))
         rows.append(row)
 
     rows = sorted(rows, key=lambda item: item["val_acc"], reverse=True)
@@ -323,6 +402,7 @@ def run_search(
             f"val_acc={row['val_acc']:.6f}\t"
             f"correct=({row['correct_alpha']},{row['correct_iter']},{row['correct_weight']})\t"
             f"smooth=({row['smooth_alpha']},{row['smooth_iter']},{row['smooth_weight']})\t"
+            f"pseudo=({row.get('pseudo_threshold')},{row.get('pseudo_weight')},{row.get('pseudo_count', 0)})\t"
             f"{row['kind']}"
         )
 
@@ -352,6 +432,7 @@ def _infer_params_from_args(args, best: Dict) -> Dict:
     keys = [
         "correct_alpha", "correct_iter", "correct_weight",
         "smooth_alpha", "smooth_iter", "smooth_weight",
+        "pseudo_threshold", "pseudo_weight",
     ]
     params = {}
     for key in keys:
@@ -371,12 +452,20 @@ def run_infer(
 ):
     """使用全部训练标签执行 C&S 并生成 A1.csv"""
     train_idx_t = torch.LongTensor(data["train_idx"]).to(device)
+    pseudo_idx, pseudo_labels = build_pseudo_labels(
+        model_probs=model_probs,
+        candidate_idx=data["test_idx"],
+        threshold=params.get("pseudo_threshold"),
+        device=device,
+    )
     scores = correct_and_smooth(
         model_probs=model_probs,
         labels=labels,
         train_idx=train_idx_t,
         adj=adj,
         params=params,
+        pseudo_idx=pseudo_idx,
+        pseudo_labels=pseudo_labels,
     )
 
     test_idx_t = torch.LongTensor(data["test_idx"]).to(device)
@@ -394,6 +483,7 @@ def run_infer(
     for cls, cnt in zip(unique, counts):
         print(f"  类别 {cls}: {cnt}")
     print(f"推理参数: {params}")
+    print(f"伪标签数量: {len(pseudo_idx)}")
     print(f"结果已保存: {args.output_path}")
 
 

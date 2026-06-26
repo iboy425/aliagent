@@ -2302,3 +2302,192 @@ python3 framework/code/infer.py \
 是否保留：
 
 - 保留为候选。
+
+---
+
+## Exp-030：A1 C&S + A2 共现衰减微调线上提交
+
+日期：2026-06-26
+
+提交文件：
+
+- `/home/aliagent/framework/output/exp030_submit_a1cs_a2_decay_combo018/prediction.zip`
+
+提交配置：
+
+- A1：
+  - 沿用 Exp-019 的 A1 C&S。
+  - `cs_normalize=random_walk`
+  - `correct_alpha=0.3`
+  - `correct_iter=5`
+  - `correct_weight=0`
+  - `smooth_alpha=0.7`
+  - `smooth_iter=7`
+  - `smooth_weight=1.0`
+- A2：
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `cooccur_decay=0.96`
+  - `history_filter=none`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.18`
+  - `user_combo_sizes=3,2,1`
+  - `user_combo_mode=prefix`
+  - `user_combo_min_count=5`
+  - `history_count_weight=0`
+
+线上指标：
+
+- 提交时间：2026-06-26 15:34:21
+- 总分：`0.5810`
+- 分类任务分数：`0.6874`
+- 推荐任务分数：`0.4746`
+
+结论：
+
+- A2：
+  - Exp-022：`0.4742`
+  - Exp-030：`0.4746`
+  - 线上提升：`+0.0004`
+- 总分：
+  - Exp-022：`0.5808`
+  - Exp-030：`0.5810`
+  - 线上提升：`+0.0002`
+- A2 启发式微调已经接近平台，继续只调 A2 小权重性价比很低。
+- 与第一名相比，最大差距在 A1：
+  - 当前 A1：`0.6874`
+  - 第一名 A1：约 `0.76845`
+  - 差距约 `0.081`
+
+下一步：
+
+- 暂停 A2 小幅参数搜索。
+- A1 优先方向：
+  - 稀疏 GAT，替代原 dense GAT，形成新模型族。
+  - 高置信伪标签 C&S，作为可选后处理。
+
+---
+
+## Tool-006：A1 稀疏 GAT 与伪标签 C&S
+
+日期：2026-06-26
+
+目标：
+
+- 按官方提分方向继续提升 A1。
+- 原代码已有 `gat`，但实现会构造 `N x N` 注意力矩阵；A1 有 13,752 个节点，这种 dense 注意力计算不合理，容易慢或 OOM。
+- 新增 `gat_sparse`：只在真实边上计算注意力，复杂度从 `O(N^2)` 降到 `O(E)`。
+- 新增高置信伪标签 C&S：在已有训练标签锚点之外，把模型高置信测试节点作为软锚点参与平滑。
+
+修改文件：
+
+- `framework/code/models.py`
+- `framework/code/train.py`
+- `framework/code/infer.py`
+- `framework/code/a1_correct_smooth.py`
+- `framework/tests/test_models.py`
+- `framework/tests/test_a1_correct_smooth.py`
+- `record.md`
+
+修改内容：
+
+- 新增 `SparseGATLayer`：
+  - 从稀疏邻接矩阵提取真实边。
+  - 自动补自环。
+  - 对每个目标节点的入边做 attention softmax。
+  - 用 `scatter_add_` 聚合边消息。
+- `GNNClassifier` 支持：
+  - `model_type="gat_sparse"`
+  - `gat_heads`
+- `train.py` 支持：
+  - `--model_type gat_sparse`
+  - `--adj_format sparse`
+  - `--num_heads`
+- `infer.py` 支持加载 `gat_sparse` checkpoint。
+- `a1_correct_smooth.py` 支持伪标签搜索和推理：
+  - `--pseudo_thresholds`
+  - `--pseudo_weights`
+  - `--pseudo_threshold`
+  - `--pseudo_weight`
+- 搜索时自动包含 no-pseudo 对照，避免误判伪标签收益。
+
+测试命令：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_models framework.tests.test_a1_correct_smooth framework.tests.test_a2_test_like_eval framework.tests.test_rec_heuristics -v
+python3 -m py_compile framework/code/models.py framework/code/train.py framework/code/infer.py framework/code/a1_correct_smooth.py framework/code/a2_offline_eval.py framework/code/a2_grid_search.py framework/code/rec_heuristics.py
+python3 framework/code/train.py \
+  --task task1 \
+  --data_path framework/data/cls_data/A1.npz \
+  --output_dir framework/output/smoke_a1_gat_sparse \
+  --epochs 1 \
+  --model_type gat_sparse \
+  --hidden_dim 64 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --lr 0.005 \
+  --dropout 0.3 \
+  --weight_decay 0.0005 \
+  --patience 5 \
+  --normalize none \
+  --adj_format sparse \
+  --feature_norm none \
+  --stratified_split \
+  --device cpu \
+  --log_interval 1
+```
+
+测试结果：
+
+- 单元测试：16 项通过。
+- 语法检查：通过。
+- `gat_sparse` 1 epoch 烟测通过：
+  - 输出目录：`framework/output/smoke_a1_gat_sparse`
+  - `best_model.pt` 正常生成。
+
+伪标签 C&S 烟测：
+
+```bash
+python3 framework/code/a1_correct_smooth.py \
+  --data_path framework/data/cls_data/A1.npz \
+  --checkpoints framework/output/exp006_a1_sage_stable/best_model.pt \
+  --device cpu \
+  --val_ratio 0.1 \
+  --split_seed 42 \
+  --stratified_split \
+  --cs_normalize random_walk \
+  --correct_alphas 0.3 \
+  --correct_iters 5 \
+  --correct_weights 0 \
+  --smooth_alphas 0.7,0.85 \
+  --smooth_iters 5 \
+  --smooth_weights 1.0 \
+  --pseudo_thresholds 0.9,0.95 \
+  --pseudo_weights 0.5,1.0 \
+  --output_json framework/output/smoke_a1_pseudo_cs_with_nopseudo/results.json
+```
+
+本地结果：
+
+- 旧 checkpoint 原始验证准确率：`0.632877`
+- no-pseudo C&S 最佳：`0.666667`
+- pseudo C&S 最佳：
+  - `pseudo_threshold=0.95`
+  - `pseudo_weight=1.0`
+  - `pseudo_count=1844`
+  - `val_acc=0.667580`
+- 伪标签相比 no-pseudo 小幅提升：`+0.000913`
+
+结论：
+
+- `gat_sparse` 是下一轮 GPU 训练重点，因为它提供新的模型族和集成多样性。
+- 伪标签 C&S 是低风险小增益后处理，建议在强 Top-5/Top-N ensemble 上搜索验证。
+- 当前不能承诺超过第一名；要接近第一名，必须先把 A1 从 `0.6874` 推到 `0.74+`，仅靠 A2 已不现实。
+
+下一步 GPU 实验：
+
+- 训练多个 `gat_sparse` checkpoint。
+- 用 `a1_ensemble_eval.py` 比较 GCN/SAGE/GAT sparse 的混合集成。
+- 在最佳混合集成上重新跑普通 C&S 和伪标签 C&S。

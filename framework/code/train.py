@@ -60,7 +60,7 @@ def parse_args():
 
     # 模型相关
     parser.add_argument('--model_type', type=str, default='sage',
-                        choices=['gcn', 'sage', 'gat', 'gru4rec', 'sasrec'],
+                        choices=['gcn', 'sage', 'gat', 'gat_sparse', 'gru4rec', 'sasrec'],
                         help='模型类型')
     parser.add_argument('--hidden_dim', type=int, default=128,
                         help='隐藏层维度')
@@ -191,11 +191,11 @@ def train_task1(args):
     else:
         features = torch.FloatTensor(features_raw).to(device)
 
-    # 邻接矩阵归一化。GCN只需要 `adj @ x`，可以安全使用稀疏tensor；
+    # 邻接矩阵归一化。GCN和稀疏GAT可以安全使用稀疏tensor；
     # GraphSAGE当前实现还会计算degree，保守起见默认继续使用dense格式。
-    use_sparse_adj = args.adj_format == 'sparse' and args.model_type == 'gcn'
-    if args.adj_format == 'sparse' and args.model_type != 'gcn':
-        logging.warning("当前仅对GCN启用稀疏邻接矩阵；非GCN模型自动回退dense格式")
+    use_sparse_adj = args.adj_format == 'sparse' and args.model_type in {'gcn', 'gat_sparse'}
+    if args.adj_format == 'sparse' and args.model_type not in {'gcn', 'gat_sparse'}:
+        logging.warning("当前仅对GCN/稀疏GAT启用稀疏邻接矩阵；其他模型自动回退dense格式")
 
     if args.normalize == 'symmetric':
         adj = normalize_adj_sparse(adj_raw, device=device) if use_sparse_adj else normalize_adj(adj_raw).to(device)
@@ -220,10 +220,14 @@ def train_task1(args):
         num_classes=num_classes,
         num_layers=args.num_layers,
         dropout=args.dropout,
-        model_type=args.model_type
+        model_type=args.model_type,
+        gat_heads=args.num_heads,
     ).to(device)
 
-    logging.info(f"模型: {args.model_type}, 隐藏维度: {args.hidden_dim}, 层数: {args.num_layers}")
+    logging.info(
+        f"模型: {args.model_type}, 隐藏维度: {args.hidden_dim}, "
+        f"层数: {args.num_layers}, 注意力头数: {args.num_heads}"
+    )
     total_params = sum(p.numel() for p in model.parameters())
     logging.info(f"总参数量: {total_params:,}")
 

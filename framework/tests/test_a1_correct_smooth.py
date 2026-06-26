@@ -87,6 +87,45 @@ class CorrectSmoothTest(unittest.TestCase):
         self.assertLess(smoothed[1, 1].item(), corrected[1, 1].item())
         self.assertTrue(torch.allclose(smoothed.sum(dim=1), torch.ones(2)))
 
+    def test_smooth_predictions_uses_pseudo_labels_as_soft_anchors(self):
+        """高置信伪标签应能作为软锚点参与平滑"""
+        adj = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        corrected = torch.tensor(
+            [
+                [0.90, 0.10],
+                [0.60, 0.40],
+                [0.20, 0.80],
+            ],
+            dtype=torch.float32,
+        )
+        labels = torch.tensor([0, -1, -1], dtype=torch.long)
+        train_idx = torch.tensor([0], dtype=torch.long)
+        pseudo_idx = torch.tensor([2], dtype=torch.long)
+        pseudo_labels = torch.tensor([1], dtype=torch.long)
+
+        smoothed = smooth_predictions(
+            corrected_probs=corrected,
+            labels=labels,
+            train_idx=train_idx,
+            adj=adj,
+            alpha=1.0,
+            num_iter=1,
+            smooth_weight=1.0,
+            pseudo_idx=pseudo_idx,
+            pseudo_labels=pseudo_labels,
+            pseudo_weight=1.0,
+        )
+
+        self.assertGreater(smoothed[1, 1].item(), smoothed[1, 0].item())
+        self.assertTrue(torch.allclose(smoothed.sum(dim=1), torch.ones(3)))
+
     def test_propagate_with_restart_keeps_seed_when_alpha_is_zero(self):
         """alpha为0时传播结果应完全等于初始种子"""
         adj = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)
