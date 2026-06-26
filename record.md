@@ -2701,3 +2701,62 @@ python3 -m py_compile framework/code/a1_correct_smooth.py framework/code/a1_ense
 
 - 工具保留。
 - 下一步在 GPU 上运行 Exp-033：`GAT 0.95 + GCN 0.05 + C&S`。
+
+---
+
+## Exp-033：A1 加权 GAT+GCN + C&S 搜索
+
+日期：2026-06-26
+
+目标：
+
+- 将 Exp-032 搜出的贪心加权 logits 组合接入 Correct and Smooth。
+- 验证 `0.95 * GAT + 0.05 * GCN` 是否不仅原始验证准确率更高，而且经过 C&S 后仍优于单 GAT。
+
+输入 checkpoint：
+
+- `output/exp031_a1_gat_sparse_h256_heads4_seed2026/best_model.pt`
+- `output/exp010_a1_grid_c5_gcn_h256_l2_symmetric_none_seed777/best_model.pt`
+
+配置：
+
+- `checkpoint_weights=95,5`
+- `cs_normalize=random_walk`
+- `correct_alpha=0.3`
+- `correct_iter=5`
+- `correct_weight=0.0`
+- `smooth_alpha` 搜索：`0.6,0.65,0.7,0.75,0.8`
+- `smooth_iter` 搜索：`3,5,7,10,15`
+- `smooth_weight` 搜索：`0.5,0.6,0.7,0.75,0.8,0.9,1.0`
+- `pseudo_thresholds=0.95,0.97`
+- `pseudo_weights=0.5,1.0`
+
+用户返回结果：
+
+- 原始加权 logits 验证准确率：`0.703196`
+- C&S 最优验证准确率：`0.711416`
+- 最优参数：
+  - Correct：`alpha=0.3, iter=5, weight=0.0`
+  - Smooth：`alpha=0.7, iter=5, weight=0.75`
+  - 伪标签：无伪标签与多组伪标签并列最优，因此默认不使用伪标签。
+
+对比：
+
+- 单 GAT 原始验证准确率：`0.700457`
+- 单 GAT + C&S：`0.710502`
+- 加权 GAT+GCN 原始验证准确率：`0.703196`
+- 加权 GAT+GCN + C&S：`0.711416`
+
+结论：
+
+- 加权 GAT+GCN + C&S 是当前 A1 本地验证最优方案。
+- 增益来自两个部分：
+  - GCN 以 `5%` 权重提供少量互补 logits，使原始验证准确率提升 `+0.002739`。
+  - Smooth C&S 再提升 `+0.008220`。
+- 伪标签没有贡献，不作为默认提交策略。
+- 该方案可作为下一次 A1 提交候选，但本地相对单 GAT C&S 只高 `+0.000914`，线上未必稳定放大。
+
+下一步：
+
+- 生成 `exp034_submit_a1_weighted_cs_a2_exp030/prediction.zip`，A1 使用 Exp-033，A2 沿用 Exp-030。
+- 如果当天提交次数紧张，优先继续跑 A2 或更强 A1 模型，再决定是否提交。
