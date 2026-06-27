@@ -3370,3 +3370,74 @@ python3 framework/code/validate_submission.py \
 - jaccard 不是单 split 偶然提升，是当前最稳的 A2 改进。
 - A2 下一步继续围绕 jaccard 做细化，而不是回到 `log_count`。
 - 如果有线上提交机会，Exp-042 优先级高于 Exp040。
+
+---
+
+## Exp-044：A2 用户画像序列神经排序模型
+
+日期：2026-06-27
+
+目标：
+
+- 回应“只靠规则不训练”的问题，新增一条真正需要 GPU 训练的 A2 路线。
+- 让模型学习 `历史 item 序列 + 用户画像类别` 到 `target_iid` 的映射。
+- 后续如果模型离线有效，再把模型分数与 jaccard 共现规则融合。
+
+为什么要这样改：
+
+- 测试用户和训练用户不重合，不能依赖用户 ID 记忆。
+- 原 GRU4Rec/SASRec 主要只吃 item 序列，没有使用 `user.csv` 的 8 个用户画像列。
+- 测试集有大量空历史和短历史用户，因此模型训练/验证必须模拟线上稀疏历史分布。
+- A2 训练集中真实出现过的 target item 只有 235 个左右，直接预测全部 2156 个 item 会浪费类别容量；新模型先只预测训练 target 集合。
+
+修改文件：
+
+- 新增 `framework/code/a2_feature_ranker.py`
+
+新增能力：
+
+- `train` 模式：
+  - 构建 item 映射、target 类别映射、用户画像类别映射。
+  - 模型输入包括历史 item embedding 均值、最近 item embedding、用户画像 embedding、历史长度桶 embedding。
+  - 支持 `--test_like_val`：验证集按测试历史长度分布裁剪。
+  - 支持 `--random_test_like_train`：训练时随机裁剪历史，模拟线上短历史。
+  - 输出 `best_model.pt` 和 `metrics.json`。
+- `predict` 模式：
+  - 从 checkpoint 恢复映射和模型。
+  - 生成 10000 行 A2 推荐文件。
+
+本地 smoke test：
+
+```bash
+python3 framework/code/a2_feature_ranker.py train \
+  --data_path framework/data/rec_data \
+  --output_dir framework/output/exp044_a2_feature_ranker_smoke \
+  --device cpu \
+  --epochs 1 \
+  --batch_size 4096 \
+  --max_len 40 \
+  --embedding_dim 32 \
+  --user_embedding_dim 4 \
+  --hidden_dim 64 \
+  --num_workers 0 \
+  --test_like_val \
+  --random_test_like_train
+```
+
+smoke test 结果：
+
+- 训练样本：`36000`
+- 验证样本：`4000`
+- target 类别数：`235`
+- 用户画像列：`u_cat_01` 到 `u_cat_08`
+- 1 epoch CPU 检查：`NDCG@10=0.139753`
+- 推理检查：成功生成 `10000` 行 A2.csv。
+
+结论：
+
+- 代码链路已通，但 1 epoch 小模型不代表真实效果。
+- 下一步需要在 GPU 上跑完整配置：
+  - 更大的 embedding / hidden_dim；
+  - 50-100 epoch；
+  - 多 seed；
+  - 与 Exp-043 jaccard 规则做融合验证。
