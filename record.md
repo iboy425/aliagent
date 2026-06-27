@@ -3311,3 +3311,62 @@ python3 framework/code/validate_submission.py \
 
 - Exp-042 是当前最强 A2 候选包。
 - 若提交机会恢复，优先提交该包验证 A2 jaccard 是否能在线上转化为提升。
+
+---
+
+## Exp-043：A2 jaccard 多 seed 稳定性验证
+
+日期：2026-06-27
+
+目标：
+
+- 验证 Exp-041 的 jaccard 提升是否只是 `seed=42` 验证切分偶然有效。
+- 修正此前 A1 在固定 split 上过拟合的问题：只有多 seed 稳定提升才作为可信提交方向。
+
+修改文件：
+
+- `framework/scripts/run_exp043_a2_multiseed_jaccard.sh`
+
+对比方案：
+
+- 旧方案：
+  - `cooccur_formula=log_count`
+  - `recent_n=10`
+  - `cooccur_decay=0.96`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.18`
+- 新方案：
+  - `cooccur_formula=jaccard`
+  - `recent_n=18`
+  - `cooccur_decay=1.0`
+  - `user_weight=0.01`
+  - `user_combo_weight=0.1`
+
+评估设置：
+
+- `val_ratio=0.1`
+- `test_like_eval=True`
+- seeds：`42, 777, 2024, 2026, 3407`
+
+结果：
+
+| seed | old weighted_NDCG | new weighted_NDCG | gain |
+| --- | ---: | ---: | ---: |
+| 42 | 0.479879 | 0.488987 | +0.009109 |
+| 777 | 0.478945 | 0.488137 | +0.009192 |
+| 2024 | 0.477384 | 0.490289 | +0.012906 |
+| 2026 | 0.469374 | 0.481861 | +0.012486 |
+| 3407 | 0.470471 | 0.480102 | +0.009631 |
+
+汇总：
+
+- 平均提升：`+0.010665`
+- 胜率：`5 / 5`
+- 最小提升：`+0.009109`
+- 最大提升：`+0.012906`
+
+结论：
+
+- jaccard 不是单 split 偶然提升，是当前最稳的 A2 改进。
+- A2 下一步继续围绕 jaccard 做细化，而不是回到 `log_count`。
+- 如果有线上提交机会，Exp-042 优先级高于 Exp040。
