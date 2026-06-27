@@ -2880,3 +2880,115 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/run_exp038_a1_gat_grid.sh
 - 目标：
   - 找到原始验证准确率超过 `0.71` 的单模型。
   - 或找到贪心加权 ensemble 明显超过 Exp-033 原始 `0.703196` 的组合。
+
+---
+
+## Exp-038：A1 稀疏 GAT GPU 网格结果
+
+日期：2026-06-27
+
+目标：
+
+- 通过更系统的 `gat_sparse` 小网格寻找比 Exp-033 更强的 A1 候选。
+
+用户返回结果：
+
+单模型固定验证集 Top 结果：
+
+- `0.700457`：`h256_heads4_d040_lr005_wd5e4_seed42`
+- `0.700457`：`h256_heads4_d050_lr003_wd5e4_seed2026`
+- `0.698630`：`h288_heads4_d045_lr005_wd5e4_seed777`
+- `0.697717`：`h224_heads4_d045_lr005_wd5e4_seed42`
+- `0.697717`：`h288_heads4_d045_lr005_wd5e4_seed42`
+
+等权集成：
+
+- Top-1：`0.700457`
+- Top-2：`0.705936`
+- Top-3：`0.709589`
+- Top-5：`0.705936`
+- Top-8：`0.703196`
+- Top-12：`0.704110`
+- Top-20：`0.696804`
+
+贪心加权集成：
+
+- Step-1：`0.700457`
+  - `h256_heads4_d040_lr005_wd5e4_seed42`
+- Step-2：`0.704110`
+  - 加入 `h224_heads4_d045_lr005_wd5e4_seed42`
+  - 权重：`0.8 / 0.2`
+- Step-3：`0.706849`
+  - 加入 `h256_heads8_d045_lr005_wd5e4_seed3407`
+  - 权重：
+    - `h256_heads4_d040_lr005_wd5e4_seed42`: `0.64`
+    - `h224_heads4_d045_lr005_wd5e4_seed42`: `0.16`
+    - `h256_heads8_d045_lr005_wd5e4_seed3407`: `0.20`
+
+结论：
+
+- Exp-038 没有找到明显更强的单模型；最强单模型仍停在 `0.700457`。
+- 但 Top-3 等权集成达到 `0.709589`，明显高于 Exp-033 的原始加权 logits `0.703196`。
+- 这说明 Exp-038 的几个 GAT 模型虽然单模型相近，但错误互补性强。
+- 下一步应该优先对 Exp-038 Top-3 等权集成做 C&S，而不是继续训练。
+
+是否保留：
+
+- 保留。
+- Top-3 等权集成是当前最值得继续后处理的 A1 候选。
+
+---
+
+## Tool-010：A1 Exp-039 C&S 候选搜索脚本
+
+日期：2026-06-27
+
+目标：
+
+- 将 Exp-038 的有效集成候选自动送入 Correct and Smooth 搜索。
+- 减少手工复制 checkpoint 路径的错误风险。
+
+修改文件：
+
+- `framework/scripts/run_exp039_a1_exp038_cs.sh`
+
+脚本包含四组候选：
+
+- `top2_equal`
+  - Exp-038 Top-2 等权。
+- `top3_equal`
+  - Exp-038 Top-3 等权。
+  - 原始验证准确率 `0.709589`，优先级最高。
+- `greedy_weighted`
+  - Exp-038 贪心加权：`64,16,20`。
+- `top3_plus_old_gcn_95_5`
+  - Exp-038 Top-3 GAT 占 `95%`
+  - Exp-010 旧 GCN 占 `5%`
+  - 用于验证跨模型族互补是否仍然有效。
+
+验证：
+
+```bash
+cd /home/aliagent
+bash -n framework/scripts/run_exp039_a1_exp038_cs.sh
+```
+
+验证结果：
+
+- Shell 语法检查通过。
+
+下一步：
+
+在 GPU 服务器运行：
+
+```bash
+cd /home/aliagent
+git pull --ff-only
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/run_exp039_a1_exp038_cs.sh
+```
+
+判断标准：
+
+- 如果最佳 C&S `val_acc > 0.711416`，替代 Exp-033 成为 A1 最终候选。
+- 如果没有超过 `0.711416`，继续沿用 Exp-033/Exp034 保底方案。
