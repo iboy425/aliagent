@@ -3441,3 +3441,22 @@ smoke test 结果：
   - 50-100 epoch；
   - 多 seed；
   - 与 Exp-043 jaccard 规则做融合验证。
+
+GPU训练结果：
+
+- 用户在 GPU 上运行完整配置后反馈：
+  - best_epoch：`38`
+  - train_loss：`2.805317717234294`
+  - lr：`0.0005`
+  - model-only NDCG@10：`0.4834490755702921`
+  - Hit@10：`0.7265`
+  - MRR：`0.40762589285714285`
+
+分析：
+
+- 模型单独分数已经接近 Exp-043 jaccard 规则，但没有超过规则基线。
+- 因为模型和规则捕捉的信号不同，下一步必须评估 `模型分数 + jaccard规则` 的融合，而不是直接提交模型。
+- 已修正 `a2_feature_ranker.py eval_fusion`：
+  - `model_weight=0` 时可复现 Exp-043：`weighted_NDCG=0.488987`。
+  - 融合评估使用拟合集构造规则统计，验证集只用于打分，避免验证泄漏。
+  - 输出普通 NDCG 和按测试历史长度分布加权的 weighted_NDCG。

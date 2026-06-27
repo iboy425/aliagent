@@ -7,7 +7,6 @@
 """
 import argparse
 import json
-import math
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
@@ -19,8 +18,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from rec_heuristics import parse_seq
+from rec_heuristics import (
+    build_cooccur_score_stats,
+    build_cooccur_stats,
+    build_global_popularity,
+    build_user_combo_profile_stats,
+    build_user_profile_stats,
+    get_user_combo_profile_counters,
+    get_user_profile_counters,
+    parse_item_counts,
+    parse_seq,
+    rank_items,
+)
 from utils import compute_hit_rate, compute_mrr, compute_ndcg, set_seed
+
+
+BUCKET_ORDER = ["len=0", "len=1", "len=2-3", "len=4-10", "len>10"]
 
 
 @dataclass
@@ -116,6 +129,29 @@ def test_like_lengths(test_df: pd.DataFrame, seq_col: str) -> np.ndarray:
     """提取测试集历史长度分布"""
     lengths = np.array([len(parse_seq(row.get(seq_col))) for _, row in test_df.iterrows()], dtype=np.int64)
     return lengths if len(lengths) else np.array([0], dtype=np.int64)
+
+
+def bucket_seq_len(length: int) -> str:
+    """按历史长度分桶"""
+    if length == 0:
+        return "len=0"
+    if length == 1:
+        return "len=1"
+    if length <= 3:
+        return "len=2-3"
+    if length <= 10:
+        return "len=4-10"
+    return "len>10"
+
+
+def compute_bucket_weights(df: pd.DataFrame, seq_col: str) -> Dict[str, float]:
+    """根据数据集历史长度分布计算桶权重"""
+    counts = {bucket: 0 for bucket in BUCKET_ORDER}
+    if len(df) == 0:
+        return {bucket: 0.0 for bucket in BUCKET_ORDER}
+    for _, row in df.iterrows():
+        counts[bucket_seq_len(len(parse_seq(row.get(seq_col))))] += 1
+    return {bucket: counts[bucket] / len(df) for bucket in BUCKET_ORDER}
 
 
 def truncate_seq_value(seq_value, keep_len: int) -> str:
@@ -237,8 +273,7 @@ class A2FeatureRanker(nn.Module):
         denom = mask.sum(dim=1).clamp(min=1)
         mean_emb = (item_emb * mask).sum(dim=1) / denom
 
-        last_pos = (seq.size(1) - 1).to(seq.device) if isinstance(seq.size(1), torch.Tensor) else seq.size(1) - 1
-        last_emb = item_emb[:, last_pos, :]
+        last_emb = item_emb[:, -1, :]
 
         user_parts = []
         for i, emb in enumerate(self.user_embeddings):
@@ -447,25 +482,8 @@ def load_bundle(raw: Dict) -> A2FeatureBundle:
 
 def predict(args):
     """生成A2提交文件"""
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    bundle = load_bundle(checkpoint["bundle"])
-
-    model_args = checkpoint["args"]
-    user_cardinalities = [len(bundle.user_value_maps[col]) for col in bundle.user_cols]
-    model = A2FeatureRanker(
-        num_items=len(bundle.item2idx),
-        num_targets=len(bundle.target_items),
-        user_cardinalities=user_cardinalities,
-        embedding_dim=model_args.get("embedding_dim", 128),
-        user_embedding_dim=model_args.get("user_embedding_dim", 12),
-        hidden_dim=model_args.get("hidden_dim", 256),
-        dropout=model_args.get("dropout", 0.2),
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
-
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    model = model.to(device)
-    model.eval()
+    model, bundle = load_ranker(args.checkpoint, device)
 
     test_df = pd.read_csv(os.path.join(args.data_path, "test.csv"))
     user_df = pd.read_csv(os.path.join(args.data_path, "user.csv"))
@@ -497,6 +515,318 @@ def predict(args):
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     out_df.to_csv(args.output_path, index=False)
     print(f"A2预测已保存: {args.output_path}, rows={len(out_df)}")
+
+
+def load_ranker(checkpoint_path: str, device: torch.device) -> Tuple[A2FeatureRanker, A2FeatureBundle]:
+    """加载训练好的排序模型"""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    bundle = load_bundle(checkpoint["bundle"])
+    model_args = checkpoint["args"]
+    user_cardinalities = [len(bundle.user_value_maps[col]) for col in bundle.user_cols]
+    model = A2FeatureRanker(
+        num_items=len(bundle.item2idx),
+        num_targets=len(bundle.target_items),
+        user_cardinalities=user_cardinalities,
+        embedding_dim=model_args.get("embedding_dim", 128),
+        user_embedding_dim=model_args.get("user_embedding_dim", 12),
+        hidden_dim=model_args.get("hidden_dim", 256),
+        dropout=model_args.get("dropout", 0.2),
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(device)
+    model.eval()
+    return model, bundle
+
+
+def parse_float_list(value: str) -> List[float]:
+    """解析逗号分隔浮点数"""
+    return [float(item.strip()) for item in str(value).split(",") if item.strip()]
+
+
+def parse_int_list(value: str) -> List[int]:
+    """解析逗号分隔整数"""
+    return [int(item.strip()) for item in str(value).split(",") if item.strip()]
+
+
+def score_dataframe_with_model(
+    df: pd.DataFrame,
+    model: A2FeatureRanker,
+    bundle: A2FeatureBundle,
+    user_lookup: pd.DataFrame,
+    seq_col: str,
+    max_len: int,
+    batch_size: int,
+    device: torch.device,
+) -> List[Dict[str, float]]:
+    """为DataFrame中每行生成模型 item 分数"""
+    all_scores: List[Dict[str, float]] = []
+    with torch.no_grad():
+        for start in range(0, len(df), batch_size):
+            batch = df.iloc[start:start + batch_size]
+            seqs, user_feats, lens = [], [], []
+            for _, row in batch.iterrows():
+                seq, seq_len = parse_item_seq_to_indices(row.get(seq_col), bundle.item2idx, max_len)
+                seqs.append(seq)
+                lens.append(seq_len)
+                user_feats.append(user_features_to_indices(str(row["uid"]), user_lookup, bundle))
+
+            seq_t = torch.tensor(seqs, dtype=torch.long, device=device)
+            user_t = torch.tensor(user_feats, dtype=torch.long, device=device)
+            len_t = torch.tensor(lens, dtype=torch.long, device=device)
+            logits = model(seq_t, user_t, len_t).detach().cpu().numpy()
+            for row_scores in logits:
+                all_scores.append({
+                    bundle.target_items[i]: float(score)
+                    for i, score in enumerate(row_scores)
+                })
+    return all_scores
+
+
+def build_rule_context(args, train_df: pd.DataFrame, user_df: pd.DataFrame, item_df: pd.DataFrame, seq_col: str):
+    """构建 jaccard 规则融合所需的统计表"""
+    candidate_items = set(item_df["iid"].astype(str).tolist())
+    global_pop = build_global_popularity(train_df)
+    cooccur_stats = build_cooccur_stats(train_df, seq_col, recent_n=args.recent_n)
+    cooccur_score_mode = "log_count"
+    if args.cooccur_formula != "log_count":
+        cooccur_stats = build_cooccur_score_stats(cooccur_stats, global_pop, formula=args.cooccur_formula)
+        cooccur_score_mode = "precomputed"
+
+    user_cols = [col for col in user_df.columns if col != "uid"]
+    user_profile_stats = None
+    combo_sizes = parse_int_list(args.user_combo_sizes)
+    if args.user_weight > 0:
+        user_profile_stats, user_lookup = build_user_profile_stats(
+            train_df=train_df,
+            user_df=user_df,
+            user_cols=user_cols,
+        )
+    else:
+        user_lookup = user_df.set_index("uid")
+    user_combo_stats, user_lookup = build_user_combo_profile_stats(
+        train_df=train_df,
+        user_df=user_df,
+        user_cols=user_cols,
+        combo_sizes=combo_sizes,
+        combo_mode=args.user_combo_mode,
+        min_count=args.user_combo_min_count,
+    )
+
+    return {
+        "candidate_items": candidate_items,
+        "global_pop": global_pop,
+        "cooccur_stats": cooccur_stats,
+        "cooccur_score_mode": cooccur_score_mode,
+        "user_cols": user_cols,
+        "user_lookup": user_lookup,
+        "user_profile_stats": user_profile_stats,
+        "user_combo_stats": user_combo_stats,
+    }
+
+
+def rank_with_fusion(
+    df: pd.DataFrame,
+    model_scores: Sequence[Dict[str, float]],
+    seq_col: str,
+    rule_context: Dict,
+    args,
+    model_weight: float,
+) -> List[List[str]]:
+    """融合模型分数和规则分数生成推荐列表"""
+    preds = []
+    for (_, row), score_map in zip(df.iterrows(), model_scores):
+        uid = str(row["uid"])
+        seq = parse_seq(row.get(seq_col))
+        user_combo_counters = get_user_combo_profile_counters(
+            user_id=uid,
+            user_lookup=rule_context["user_lookup"],
+            combo_profile_stats=rule_context["user_combo_stats"],
+            min_count=args.user_combo_min_count,
+        )
+        user_counters = get_user_profile_counters(
+            user_id=uid,
+            user_lookup=rule_context["user_lookup"],
+            user_profile_stats=rule_context["user_profile_stats"],
+            user_cols=rule_context["user_cols"],
+        )
+        preds.append(rank_items(
+            seq=seq,
+            candidate_items=rule_context["candidate_items"],
+            global_pop=rule_context["global_pop"],
+            cooccur_stats=rule_context["cooccur_stats"],
+            topk=args.topk,
+            strategy="hybrid",
+            history_filter=args.history_filter,
+            recent_n=args.recent_n,
+            model_scores=score_map,
+            user_profile_counters=user_counters,
+            user_combo_counters=user_combo_counters,
+            history_counts=parse_item_counts(row.get("item_seq_counts")),
+            model_weight=model_weight,
+            pop_weight=args.pop_weight,
+            cooccur_weight=args.cooccur_weight,
+            cooccur_decay=args.cooccur_decay,
+            cooccur_score_mode=rule_context["cooccur_score_mode"],
+            user_weight=args.user_weight,
+            user_combo_weight=args.user_combo_weight,
+            history_count_weight=args.history_count_weight,
+            pop_penalty_weight=args.pop_penalty_weight,
+        ))
+    return preds
+
+
+def evaluate_prediction_lists(
+    preds: Sequence[Sequence[str]],
+    targets: Sequence[str],
+    df: pd.DataFrame,
+    seq_col: str,
+    topk: int,
+    bucket_weights: Dict[str, float],
+) -> Dict[str, float]:
+    """计算整体指标、分桶指标和按测试分布加权指标"""
+    rows = []
+    bucket_rows = {bucket: [] for bucket in BUCKET_ORDER}
+    for pred, target, (_, row) in zip(preds, targets, df.iterrows()):
+        ndcg = 0.0
+        rr = 0.0
+        hit = 0.0
+        for rank, item in enumerate(pred[:topk], start=1):
+            if item == target:
+                ndcg = 1.0 / np.log2(rank + 1)
+                rr = 1.0 / rank
+                hit = 1.0
+                break
+        item = {
+            "ndcg": float(ndcg),
+            "hit": float(hit),
+            "mrr": float(rr),
+        }
+        rows.append(item)
+        bucket_rows[bucket_seq_len(len(parse_seq(row.get(seq_col))))].append(item)
+
+    def avg(metric_rows: Sequence[Dict[str, float]], key: str) -> float:
+        if not metric_rows:
+            return 0.0
+        return float(np.mean([item[key] for item in metric_rows]))
+
+    metrics = {
+        "ndcg": avg(rows, "ndcg"),
+        "hit": avg(rows, "hit"),
+        "mrr": avg(rows, "mrr"),
+        "samples": len(rows),
+        "buckets": {},
+        "bucket_weights": dict(bucket_weights),
+    }
+    for bucket in BUCKET_ORDER:
+        metrics["buckets"][bucket] = {
+            "samples": len(bucket_rows[bucket]),
+            "ndcg": avg(bucket_rows[bucket], "ndcg"),
+            "hit": avg(bucket_rows[bucket], "hit"),
+            "mrr": avg(bucket_rows[bucket], "mrr"),
+        }
+
+    for metric_name in ["ndcg", "hit", "mrr"]:
+        metrics[f"weighted_{metric_name}"] = float(sum(
+            bucket_weights.get(bucket, 0.0) * metrics["buckets"][bucket][metric_name]
+            for bucket in BUCKET_ORDER
+        ))
+    return metrics
+
+
+def eval_fusion(args):
+    """离线评估模型分数与 jaccard 规则融合"""
+    set_seed(args.seed)
+    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+    model, bundle = load_ranker(args.checkpoint, device)
+
+    train_df = pd.read_csv(os.path.join(args.data_path, "train.csv"))
+    test_df = pd.read_csv(os.path.join(args.data_path, "test.csv"))
+    user_df = pd.read_csv(os.path.join(args.data_path, "user.csv"))
+    item_df = pd.read_csv(os.path.join(args.data_path, "item.csv"))
+    seq_col = choose_seq_col(train_df, args.seq_col)
+    test_seq_col = choose_seq_col(test_df, args.seq_col)
+
+    fit_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
+    if args.test_like_val:
+        lengths = test_like_lengths(test_df, test_seq_col)
+        val_df = apply_fixed_test_like_truncation(val_df, lengths, seq_col, args.seed)
+
+    user_lookup = user_df.set_index("uid")
+    rule_context = build_rule_context(args, fit_df, user_df, item_df, seq_col)
+    model_scores = score_dataframe_with_model(
+        val_df,
+        model,
+        bundle,
+        user_lookup,
+        seq_col,
+        args.max_len,
+        args.batch_size,
+        device,
+    )
+    targets = val_df["target_iid"].astype(str).tolist()
+    bucket_weights = compute_bucket_weights(test_df, test_seq_col)
+
+    results = []
+    for model_weight in parse_float_list(args.model_weights):
+        preds = rank_with_fusion(val_df, model_scores, seq_col, rule_context, args, model_weight)
+        metrics = evaluate_prediction_lists(preds, targets, val_df, seq_col, args.topk, bucket_weights)
+        result = {
+            "model_weight": model_weight,
+            **metrics,
+        }
+        results.append(result)
+
+    results.sort(key=lambda item: item[args.sort_metric], reverse=True)
+    print("=" * 100)
+    print("A2模型 + jaccard规则融合离线评估")
+    print("=" * 100)
+    for item in results[:20]:
+        print(
+            f"model_weight={item['model_weight']:.4f}\t"
+            f"NDCG@{args.topk}={item['ndcg']:.6f}\t"
+            f"weighted_NDCG={item['weighted_ndcg']:.6f}\t"
+            f"Hit={item['hit']:.6f}\tMRR={item['mrr']:.6f}"
+        )
+    print(f"最佳: {results[0]}")
+
+    if args.output_json:
+        os.makedirs(os.path.dirname(args.output_json) or ".", exist_ok=True)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump({"results": results, "best": results[0]}, f, ensure_ascii=False, indent=2)
+
+
+def predict_fusion(args):
+    """生成模型 + jaccard 规则融合的 A2 提交文件"""
+    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+    model, bundle = load_ranker(args.checkpoint, device)
+
+    train_df = pd.read_csv(os.path.join(args.data_path, "train.csv"))
+    test_df = pd.read_csv(os.path.join(args.data_path, "test.csv"))
+    user_df = pd.read_csv(os.path.join(args.data_path, "user.csv"))
+    item_df = pd.read_csv(os.path.join(args.data_path, "item.csv"))
+    seq_col = choose_seq_col(test_df, args.seq_col)
+    train_seq_col = choose_seq_col(train_df, args.seq_col)
+
+    user_lookup = user_df.set_index("uid")
+    rule_context = build_rule_context(args, train_df, user_df, item_df, train_seq_col)
+    model_scores = score_dataframe_with_model(
+        test_df,
+        model,
+        bundle,
+        user_lookup,
+        seq_col,
+        args.max_len,
+        args.batch_size,
+        device,
+    )
+    preds = rank_with_fusion(test_df, model_scores, seq_col, rule_context, args, args.model_weight)
+    out_df = pd.DataFrame({
+        "uid": test_df["uid"].astype(str).tolist(),
+        "prediction": [",".join(items[:args.topk]) for items in preds],
+    })
+    os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
+    out_df.to_csv(args.output_path, index=False)
+    print(f"A2融合预测已保存: {args.output_path}, rows={len(out_df)}")
 
 
 def build_parser():
@@ -535,6 +865,50 @@ def build_parser():
     pred_parser.add_argument("--checkpoint", type=str, required=True)
     pred_parser.add_argument("--output_path", type=str, required=True)
 
+    fusion_common = argparse.ArgumentParser(add_help=False)
+    fusion_common.add_argument("--checkpoint", type=str, required=True)
+    fusion_common.add_argument("--val_ratio", type=float, default=0.1)
+    fusion_common.add_argument("--seed", type=int, default=42)
+    fusion_common.add_argument("--test_like_val", action="store_true")
+    fusion_common.add_argument("--history_filter", type=str, default="none", choices=["none", "soft", "hard"])
+    fusion_common.add_argument("--recent_n", type=int, default=18)
+    fusion_common.add_argument(
+        "--cooccur_formula",
+        type=str,
+        default="jaccard",
+        choices=["log_count", "count", "confidence", "jaccard", "lift", "sqrt_lift", "pmi", "log_pmi"],
+    )
+    fusion_common.add_argument("--cooccur_weight", type=float, default=1.0)
+    fusion_common.add_argument("--cooccur_decay", type=float, default=1.0)
+    fusion_common.add_argument("--pop_weight", type=float, default=0.0)
+    fusion_common.add_argument("--pop_penalty_weight", type=float, default=0.0)
+    fusion_common.add_argument("--history_count_weight", type=float, default=0.0)
+    fusion_common.add_argument("--user_weight", type=float, default=0.01)
+    fusion_common.add_argument("--user_combo_weight", type=float, default=0.1)
+    fusion_common.add_argument("--user_combo_sizes", type=str, default="3,2,1")
+    fusion_common.add_argument("--user_combo_mode", type=str, default="prefix", choices=["prefix", "all"])
+    fusion_common.add_argument("--user_combo_min_count", type=int, default=5)
+
+    eval_fusion_parser = subparsers.add_parser("eval_fusion", parents=[common, fusion_common])
+    eval_fusion_parser.add_argument(
+        "--model_weights",
+        type=str,
+        default="0,0.001,0.002,0.005,0.01,0.02,0.05,0.1,0.2,0.5,1.0",
+        help="逗号分隔的模型融合权重搜索列表",
+    )
+    eval_fusion_parser.add_argument(
+        "--sort_metric",
+        type=str,
+        default="weighted_ndcg",
+        choices=["ndcg", "weighted_ndcg"],
+        help="选择最佳模型融合权重时使用的指标",
+    )
+    eval_fusion_parser.add_argument("--output_json", type=str, default="")
+
+    pred_fusion_parser = subparsers.add_parser("predict_fusion", parents=[common, fusion_common])
+    pred_fusion_parser.add_argument("--model_weight", type=float, required=True)
+    pred_fusion_parser.add_argument("--output_path", type=str, required=True)
+
     return parser
 
 
@@ -545,6 +919,10 @@ def main():
         train(args)
     elif args.mode == "predict":
         predict(args)
+    elif args.mode == "eval_fusion":
+        eval_fusion(args)
+    elif args.mode == "predict_fusion":
+        predict_fusion(args)
     else:
         raise ValueError(args.mode)
 
