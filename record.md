@@ -2992,3 +2992,114 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/run_exp039_a1_exp038_cs.sh
 
 - 如果最佳 C&S `val_acc > 0.711416`，替代 Exp-033 成为 A1 最终候选。
 - 如果没有超过 `0.711416`，继续沿用 Exp-033/Exp034 保底方案。
+
+---
+
+## Exp-039：A1 Exp-038 集成候选 C&S 结果
+
+日期：2026-06-27
+
+目标：
+
+- 验证 Exp-038 中有效的 GAT 集成候选是否能通过 C&S 超过 Exp-033。
+
+用户返回结果：
+
+- `greedy_weighted.json`
+  - 验证准确率：`0.713242`
+  - Correct：`alpha=0.3, iter=5, weight=0.0`
+  - Smooth：`alpha=0.75, iter=5, weight=0.75`
+  - 伪标签：关闭
+- `top3_plus_old_gcn_95_5.json`
+  - 验证准确率：`0.709589`
+- `top3_equal.json`
+  - 验证准确率：`0.709589`
+- `top2_equal.json`
+  - 验证准确率：`0.709589`
+
+对比：
+
+- Exp-033 最优：`0.711416`
+- Exp-039 greedy weighted + C&S：`0.713242`
+- 本地提升：`+0.001826`
+
+结论：
+
+- Exp-039 greedy weighted + C&S 是当前 A1 本地最优。
+- 旧 GCN 加入 Exp-038 Top-3 后没有提升，说明这轮最优互补来自 GAT 内部不同配置，而不是跨 GCN/GAT 模型族。
+- 伪标签仍然没有贡献，不使用。
+
+是否保留：
+
+- 保留为最终 A1 候选。
+
+---
+
+## Tool-011：Exp-040 最后一次提交候选打包脚本
+
+日期：2026-06-27
+
+目标：
+
+- 用当前最强 A1 和线上最强 A2 生成最后一次提交候选包。
+- 降低手工打包、路径复制、CSV 格式错误的风险。
+
+修改文件：
+
+- `framework/scripts/build_exp040_final_candidate.sh`
+
+提交包配置：
+
+- A1：
+  - 使用 Exp-039 greedy weighted + C&S。
+  - checkpoint：
+    - `output/exp038_a1_gat_grid/h256_heads4_d040_lr005_wd5e4_seed42/best_model.pt`
+    - `output/exp038_a1_gat_grid/h224_heads4_d045_lr005_wd5e4_seed42/best_model.pt`
+    - `output/exp038_a1_gat_grid/h256_heads8_d045_lr005_wd5e4_seed3407/best_model.pt`
+  - checkpoint 权重：`64,16,20`
+  - C&S：
+    - `cs_normalize=random_walk`
+    - `correct=(0.3,5,0.0)`
+    - `smooth=(0.75,5,0.75)`
+- A2：
+  - 沿用 Exp-030 线上最佳。
+  - `rec_strategy=history`
+  - `seq_col=item_seq_raw`
+  - `recent_n=10`
+  - `cooccur_decay=0.96`
+  - `history_filter=none`
+  - `user_weight=0.02`
+  - `user_combo_weight=0.18`
+  - `user_combo_sizes=3,2,1`
+  - `user_combo_mode=prefix`
+  - `user_combo_min_count=5`
+
+脚本产物：
+
+- `output/exp040_submit_a1_exp039_greedy_a2_exp030/A1.csv`
+- `output/exp040_submit_a1_exp039_greedy_a2_exp030/A2.csv`
+- `output/exp040_submit_a1_exp039_greedy_a2_exp030/prediction.zip`
+
+验证：
+
+```bash
+cd /home/aliagent
+bash -n framework/scripts/build_exp040_final_candidate.sh
+```
+
+验证结果：
+
+- Shell 语法检查通过。
+
+下一步：
+
+在 GPU 服务器运行：
+
+```bash
+cd /home/aliagent
+git pull --ff-only
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/build_exp040_final_candidate.sh
+```
+
+运行完成后必须确认 `validate_submission.py` 输出“提交文件校验通过”，再考虑提交。
