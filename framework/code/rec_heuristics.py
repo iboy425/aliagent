@@ -381,6 +381,65 @@ def build_cooccur_stats(
     return stats
 
 
+def build_cooccur_score_stats(
+    cooccur_stats: Mapping[str, Counter],
+    global_pop: Counter,
+    formula: str = "log_count",
+) -> Dict[str, Dict[str, float]]:
+    """把 item-target 共现计数转换为关联强度分数
+
+    `log_count` 对应旧逻辑；其他公式用于降低纯热门target的干扰，强调
+    “某个历史item出现后更可能转向哪个target”的条件关系。
+    """
+    allowed = {
+        "log_count",
+        "count",
+        "confidence",
+        "jaccard",
+        "lift",
+        "sqrt_lift",
+        "pmi",
+        "log_pmi",
+    }
+    if formula not in allowed:
+        raise ValueError(f"未知共现打分公式: {formula}")
+
+    total_targets = sum(global_pop.values())
+    if total_targets <= 0:
+        total_targets = 1
+
+    score_stats: Dict[str, Dict[str, float]] = {}
+    for hist_item, counter in cooccur_stats.items():
+        source_total = sum(counter.values())
+        if source_total <= 0:
+            continue
+        score_stats[hist_item] = {}
+        for target, count in counter.items():
+            count = float(count)
+            target_count = float(global_pop.get(target, 0))
+            if formula == "count":
+                score = count
+            elif formula == "log_count":
+                score = math.log1p(count)
+            elif formula == "confidence":
+                score = count / source_total
+            elif formula == "jaccard":
+                score = count / max(source_total + target_count - count, 1.0)
+            else:
+                target_prob = max(target_count / total_targets, 1e-12)
+                confidence = count / source_total
+                lift = confidence / target_prob
+                if formula == "lift":
+                    score = lift
+                elif formula == "sqrt_lift":
+                    score = math.sqrt(lift)
+                else:
+                    pmi = max(0.0, math.log(max(lift, 1e-12)))
+                    score = pmi if formula == "pmi" else math.log1p(count) * pmi
+            score_stats[hist_item][target] = float(score)
+    return score_stats
+
+
 def normalize_counter(counter: Counter) -> Dict[str, float]:
     """把计数归一化为0到1之间的相对分数"""
     if not counter:
@@ -421,6 +480,7 @@ def _add_cooccur_scores(
     cooccur_stats: Mapping[str, Counter],
     weight: float,
     decay: float = 1.0,
+    score_mode: str = "log_count",
 ):
     """加入历史共现分数"""
     if weight <= 0:
@@ -432,7 +492,8 @@ def _add_cooccur_scores(
     for age, hist_item in enumerate(reversed(history_items)):
         item_weight = decay ** age
         for target, count in cooccur_stats.get(hist_item, {}).items():
-            scores[target] = scores.get(target, 0.0) + weight * item_weight * math.log1p(count)
+            base_score = float(count) if score_mode == "precomputed" else math.log1p(count)
+            scores[target] = scores.get(target, 0.0) + weight * item_weight * base_score
 
 
 def _add_model_scores(
@@ -525,6 +586,7 @@ def rank_items(
     pop_weight: float = 1.0,
     cooccur_weight: float = 1.0,
     cooccur_decay: float = 1.0,
+    cooccur_score_mode: str = "log_count",
     user_weight: float = 0.0,
     user_combo_weight: float = 0.0,
     item_feature_weight: float = 0.0,
@@ -549,6 +611,7 @@ def rank_items(
         item_feature_counters: 当前历史item特征对应的target热门计数器。
         model_weight/pop_weight/cooccur_weight/user_weight: 各类信号的融合权重。
         cooccur_decay: 历史共现的近因衰减系数，1.0表示不衰减。
+        cooccur_score_mode: `log_count`表示旧逻辑；`precomputed`表示共现表中已是分数。
         pop_penalty_weight: 热门惩罚权重，用于降低列表过度集中风险。
         history_soft_factor: soft过滤时历史item保留的分数比例。
 
@@ -571,7 +634,14 @@ def rank_items(
 
     if strategy in {"last_item", "history", "hybrid"}:
         history_items = recent_seq[-1:] if strategy == "last_item" else recent_seq
-        _add_cooccur_scores(scores, history_items, cooccur_stats, cooccur_weight, cooccur_decay)
+        _add_cooccur_scores(
+            scores,
+            history_items,
+            cooccur_stats,
+            cooccur_weight,
+            cooccur_decay,
+            cooccur_score_mode,
+        )
 
     _add_user_profile_scores(scores, user_profile_counters, user_weight)
     _add_user_profile_scores(scores, user_combo_counters, user_combo_weight)

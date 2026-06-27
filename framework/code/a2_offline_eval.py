@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from rec_heuristics import (
+    build_cooccur_score_stats,
     build_cooccur_stats,
     build_global_popularity,
     build_item_feature_transition_stats,
@@ -185,6 +186,7 @@ def evaluate_strategy(
     item_feature_recent_n: int = 10,
     item_feature_min_count: int = 20,
     cooccur_decay: float = 1.0,
+    cooccur_score_mode: str = "log_count",
     pop_penalty_weight: float = 0.0,
     history_count_weight: float = 0.0,
 ) -> Dict:
@@ -233,6 +235,7 @@ def evaluate_strategy(
             user_combo_weight=user_combo_weight,
             item_feature_weight=item_feature_weight,
             cooccur_decay=cooccur_decay,
+            cooccur_score_mode=cooccur_score_mode,
             history_count_weight=history_count_weight,
             pop_penalty_weight=pop_penalty_weight,
         )
@@ -263,6 +266,7 @@ def evaluate_strategy(
         "item_feature_recent_n": item_feature_recent_n,
         "item_feature_min_count": item_feature_min_count,
         "cooccur_decay": cooccur_decay,
+        "cooccur_score_mode": cooccur_score_mode,
         "pop_penalty_weight": pop_penalty_weight,
         "history_count_weight": history_count_weight,
         "samples": len(rows),
@@ -326,6 +330,9 @@ def parse_args():
     parser.add_argument("--recent_n", type=int, default=20, help="共现统计使用最近多少个历史item")
     parser.add_argument("--cooccur_decay", type=float, default=1.0,
                         help="历史共现近因衰减系数，1.0表示不衰减")
+    parser.add_argument("--cooccur_formula", type=str, default="log_count",
+                        choices=["log_count", "count", "confidence", "jaccard", "lift", "sqrt_lift", "pmi", "log_pmi"],
+                        help="历史共现计数转换公式")
     parser.add_argument("--user_weight", type=float, default=0.0, help="用户画像分组热门度融合权重")
     parser.add_argument("--user_combo_weight", type=float, default=0.0,
                         help="用户画像前缀组合热门度融合权重")
@@ -380,6 +387,14 @@ def main():
         val_df = apply_test_like_history_distribution(val_df, test_df, seq_col, args.seed)
     global_pop = build_global_popularity(fit_df)
     cooccur_stats = build_cooccur_stats(fit_df, seq_col, recent_n=args.recent_n)
+    cooccur_score_mode = "log_count"
+    if args.cooccur_formula != "log_count":
+        cooccur_stats = build_cooccur_score_stats(
+            cooccur_stats=cooccur_stats,
+            global_pop=global_pop,
+            formula=args.cooccur_formula,
+        )
+        cooccur_score_mode = "precomputed"
 
     user_cols = []
     user_lookup = None
@@ -454,6 +469,7 @@ def main():
     )
     print(f"history_count_weight: {args.history_count_weight}")
     print(f"cooccur_decay: {args.cooccur_decay}")
+    print(f"cooccur_formula: {args.cooccur_formula}")
     print(f"test_like_eval: {args.test_like_eval}, sort_metric: {args.sort_metric}")
     print(f"test bucket weights: {bucket_weights}")
     print("-" * 80)
@@ -486,6 +502,7 @@ def main():
             item_feature_recent_n=item_feature_recent_n,
             item_feature_min_count=args.item_feature_min_count,
             cooccur_decay=args.cooccur_decay,
+            cooccur_score_mode=cooccur_score_mode,
             pop_penalty_weight=args.pop_penalty_weight,
             history_count_weight=args.history_count_weight,
         )

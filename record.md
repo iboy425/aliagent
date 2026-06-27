@@ -3103,3 +3103,211 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda ./scripts/build_exp040_final_candidate.sh
 ```
 
 运行完成后必须确认 `validate_submission.py` 输出“提交文件校验通过”，再考虑提交。
+
+---
+
+## Tool-012：A2 共现打分公式扩展
+
+日期：2026-06-27
+
+目标：
+
+- 线上 Exp-040 证明 A1 固定验证集过拟合，继续追 A1 本地小幅提升风险很高。
+- A2 当前线上稳定在 `0.4746`，与第一名 A2 `0.50967` 差距较大。
+- 将 A2 历史 item 到 target 的共现打分从单一 `log_count` 扩展为多种 item-item 关联强度。
+
+修改文件：
+
+- `framework/code/rec_heuristics.py`
+- `framework/code/a2_offline_eval.py`
+- `framework/code/a2_grid_search.py`
+- `framework/code/infer.py`
+- `framework/tests/test_rec_heuristics.py`
+
+修改内容：
+
+- 新增 `build_cooccur_score_stats()`：
+  - `log_count`：旧逻辑，`log1p(count)`
+  - `count`
+  - `confidence`
+  - `jaccard`
+  - `lift`
+  - `sqrt_lift`
+  - `pmi`
+  - `log_pmi`
+- `rank_items()` 新增 `cooccur_score_mode`：
+  - `log_count`：保持旧逻辑。
+  - `precomputed`：使用预计算的共现关联分数。
+- `a2_offline_eval.py` 新增 `--cooccur_formula`
+- `a2_grid_search.py` 新增 `--cooccur_formulas`
+- `infer.py` 新增 `--cooccur_formula`
+- 默认值均为 `log_count`，兼容 Exp-030 线上最佳旧配置。
+
+测试：
+
+```bash
+cd /home/aliagent
+python3 -m unittest framework.tests.test_rec_heuristics -v
+python3 -m py_compile framework/code/rec_heuristics.py framework/code/a2_offline_eval.py framework/code/a2_grid_search.py framework/code/infer.py
+```
+
+测试结果：
+
+- 单元测试：9 项通过。
+- 语法检查：通过。
+
+---
+
+## Exp-041：A2 jaccard 共现公式实验
+
+日期：2026-06-27
+
+目标：
+
+- 验证更像 item-item 关联强度的公式是否优于旧 `log_count`。
+- 评估方式继续使用 `test_like_eval`，因为测试集短历史/空历史比例远高于训练集原始分布。
+
+快速筛选命令：
+
+```bash
+python3 framework/code/a2_grid_search.py \
+  --data_path framework/data/rec_data \
+  --val_ratio 0.1 \
+  --seed 42 \
+  --topk 10 \
+  --seq_cols item_seq_raw \
+  --recent_ns 10,15 \
+  --cooccur_decays 0.96,1.0 \
+  --cooccur_formulas log_count,confidence,jaccard,lift,sqrt_lift,pmi,log_pmi \
+  --strategies history \
+  --history_filters none \
+  --user_weights 0.02 \
+  --user_combo_weights 0.18 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_mode prefix \
+  --user_combo_min_count 5 \
+  --item_feature_weights 0 \
+  --pop_penalty_weights 0 \
+  --history_count_weights 0 \
+  --test_like_eval \
+  --sort_metric weighted_ndcg \
+  --top_results 30 \
+  --output_json framework/output/exp041_a2_cooccur_formula_grid/quick_results.json
+```
+
+快速筛选结果：
+
+- 最佳：`jaccard`
+  - `recent_n=15`
+  - `cooccur_decay=1.0`
+  - `weighted_NDCG@10=0.485350`
+- 当前 Exp-030 A2 离线候选：
+  - `log_count`
+  - `recent_n=10`
+  - `cooccur_decay=0.96`
+  - `weighted_NDCG@10=0.479879`
+
+细化搜索结果：
+
+- 最佳：`jaccard`
+  - `seq_col=item_seq_raw`
+  - `recent_n=18`
+  - `cooccur_decay=1.0`
+  - `user_weight=0.01`
+  - `user_combo_weight=0.1`
+  - `weighted_NDCG@10=0.488987`
+  - `NDCG@10=0.486410`
+  - `Hit@10=0.725500`
+  - `MRR=0.411783`
+
+结论：
+
+- jaccard 明显优于旧 `log_count`。
+- 该方向是当前最强 A2 候选，比 A1 继续本地小幅调参更值得提交验证。
+
+---
+
+## Exp-042：A1 Exp-030 + A2 jaccard 候选包
+
+日期：2026-06-27
+
+目标：
+
+- A1 回退到线上已验证更稳的 Exp-030 A1。
+- A2 使用 Exp-041 jaccard 最优参数。
+
+候选包路径：
+
+- `framework/output/exp042_submit_a1_exp030_a2_jaccard/prediction.zip`
+
+A1：
+
+- 直接复用 `framework/output/exp030_submit_a1cs_a2_decay_combo018/A1.csv`
+- 该 A1 在线上得分为 `0.6874`，高于 Exp040 的 `0.6848`。
+
+A2：
+
+- `rec_strategy=history`
+- `seq_col=item_seq_raw`
+- `recent_n=18`
+- `cooccur_formula=jaccard`
+- `cooccur_decay=1.0`
+- `history_filter=none`
+- `user_weight=0.01`
+- `user_combo_weight=0.1`
+- `user_combo_sizes=3,2,1`
+- `user_combo_mode=prefix`
+- `user_combo_min_count=5`
+
+生成与校验：
+
+```bash
+python3 framework/code/infer.py \
+  --task task2 \
+  --data_path framework/data/rec_data \
+  --output_path framework/output/exp042_submit_a1_exp030_a2_jaccard/A2.csv \
+  --rec_strategy history \
+  --seq_col item_seq_raw \
+  --recent_n 18 \
+  --cooccur_formula jaccard \
+  --cooccur_decay 1.0 \
+  --history_filter none \
+  --user_weight 0.01 \
+  --user_combo_weight 0.1 \
+  --user_combo_sizes 3,2,1 \
+  --user_combo_mode prefix \
+  --user_combo_min_count 5 \
+  --history_count_weight 0 \
+  --user_profile_cols auto \
+  --topk 10 \
+  --device cpu
+
+python3 framework/code/validate_submission.py \
+  --zip_path framework/output/exp042_submit_a1_exp030_a2_jaccard/prediction.zip \
+  --cls_data_path framework/data/cls_data/A1.npz \
+  --rec_data_dir framework/data/rec_data \
+  --topk 10
+```
+
+校验结果：
+
+- A1 通过：
+  - 行数 `2751`
+  - 表头正确
+  - `test_idx` 顺序正确
+- A2 通过：
+  - 行数 `10000`
+  - 表头正确
+  - 每行 10 个合法 item
+  - 无重复 item
+- `prediction.zip` 校验通过。
+
+与 Exp-030 A2 差异：
+
+- `6847 / 10000` 个用户推荐串发生变化。
+- 变化比例：`68.47%`
+
+结论：
+
+- Exp-042 是当前最强 A2 候选包。
+- 若提交机会恢复，优先提交该包验证 A2 jaccard 是否能在线上转化为提升。

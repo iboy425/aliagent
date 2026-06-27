@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from models import GNNClassifier, GRU4Rec, SASRec
 from datasets import GraphDataset, RecDataset, load_rec_data
 from rec_heuristics import (
+    build_cooccur_score_stats,
     build_cooccur_stats,
     build_global_popularity,
     build_item_feature_transition_stats,
@@ -102,6 +103,9 @@ def parse_args():
                         help='A2历史共现分数融合权重')
     parser.add_argument('--cooccur_decay', type=float, default=1.0,
                         help='A2历史共现近因衰减系数，1.0表示不衰减')
+    parser.add_argument('--cooccur_formula', type=str, default='log_count',
+                        choices=['log_count', 'count', 'confidence', 'jaccard', 'lift', 'sqrt_lift', 'pmi', 'log_pmi'],
+                        help='A2历史共现打分公式')
     parser.add_argument('--user_weight', type=float, default=0.0,
                         help='A2用户画像分组热门度融合权重')
     parser.add_argument('--user_combo_weight', type=float, default=0.0,
@@ -482,6 +486,14 @@ def infer_task2_v2(args):
 
     global_pop = build_global_popularity(train_df)
     cooccur_stats = build_cooccur_stats(train_df, train_seq_col, recent_n=args.recent_n)
+    cooccur_score_mode = 'log_count'
+    if args.cooccur_formula != 'log_count':
+        cooccur_stats = build_cooccur_score_stats(
+            cooccur_stats=cooccur_stats,
+            global_pop=global_pop,
+            formula=args.cooccur_formula,
+        )
+        cooccur_score_mode = 'precomputed'
 
     user_cols = []
     user_lookup = None
@@ -550,11 +562,11 @@ def infer_task2_v2(args):
     logging.info(
         "推荐配置: strategy=%s, history_filter=%s, seq_col=%s, recent_n=%s, "
         "weights(model/pop/cooccur/user/user_combo/item_feature/hist_count)=%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f, "
-        "cooccur_decay=%.3f, pop_penalty=%.3f",
+        "cooccur_formula=%s, cooccur_decay=%.3f, pop_penalty=%.3f",
         args.rec_strategy, args.history_filter, test_seq_col, args.recent_n,
         args.model_weight, args.pop_weight, args.cooccur_weight, args.user_weight,
         args.user_combo_weight, args.item_feature_weight, args.history_count_weight,
-        args.cooccur_decay, args.pop_penalty_weight,
+        args.cooccur_formula, args.cooccur_decay, args.pop_penalty_weight,
     )
     logging.info(f"候选item数: {len(candidate_items)}, target热门item数: {len(global_pop)}")
 
@@ -675,6 +687,7 @@ def infer_task2_v2(args):
             pop_weight=args.pop_weight,
             cooccur_weight=args.cooccur_weight,
             cooccur_decay=args.cooccur_decay,
+            cooccur_score_mode=cooccur_score_mode,
             user_weight=args.user_weight,
             user_combo_weight=args.user_combo_weight,
             item_feature_weight=args.item_feature_weight,

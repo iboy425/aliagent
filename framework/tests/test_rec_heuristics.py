@@ -12,6 +12,7 @@ if CODE_DIR not in sys.path:
     sys.path.insert(0, CODE_DIR)
 
 from rec_heuristics import (  # noqa: E402
+    build_cooccur_score_stats,
     build_item_feature_transition_stats,
     build_user_combo_profile_stats,
     get_item_feature_counters,
@@ -202,6 +203,48 @@ class RecHeuristicsTest(unittest.TestCase):
 
         self.assertEqual(no_decay[0], "i_old_target")
         self.assertEqual(with_decay[0], "i_new_target")
+
+    def test_build_cooccur_score_stats_confidence_prefers_specific_transition(self):
+        """confidence公式应偏向转化率更高的历史item-target关系"""
+        cooccur_stats = {
+            "broad": Counter({"hot": 10, "other": 90}),
+            "specific": Counter({"niche": 3}),
+        }
+        global_pop = Counter({"hot": 100, "other": 100, "niche": 3})
+
+        score_stats = build_cooccur_score_stats(
+            cooccur_stats=cooccur_stats,
+            global_pop=global_pop,
+            formula="confidence",
+        )
+
+        self.assertLess(score_stats["broad"]["hot"], score_stats["specific"]["niche"])
+
+    def test_build_cooccur_score_stats_log_count_keeps_count_order(self):
+        """log_count公式应保持旧逻辑：共现次数越多分数越高"""
+        cooccur_stats = {"hist": Counter({"many": 9, "few": 1})}
+        global_pop = Counter({"many": 9, "few": 1})
+
+        score_stats = build_cooccur_score_stats(
+            cooccur_stats=cooccur_stats,
+            global_pop=global_pop,
+            formula="log_count",
+        )
+
+        self.assertGreater(score_stats["hist"]["many"], score_stats["hist"]["few"])
+
+    def test_build_cooccur_score_stats_pmi_downweights_plain_popularity(self):
+        """pmi公式应降低只因全局热门而出现的target得分"""
+        cooccur_stats = {"hist": Counter({"hot": 10, "rare": 2})}
+        global_pop = Counter({"hot": 1000, "rare": 2})
+
+        score_stats = build_cooccur_score_stats(
+            cooccur_stats=cooccur_stats,
+            global_pop=global_pop,
+            formula="pmi",
+        )
+
+        self.assertGreater(score_stats["hist"]["rare"], score_stats["hist"]["hot"])
 
 
 if __name__ == "__main__":

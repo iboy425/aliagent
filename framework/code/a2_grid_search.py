@@ -19,6 +19,7 @@ from a2_offline_eval import (
     split_train_val,
 )
 from rec_heuristics import (
+    build_cooccur_score_stats,
     build_cooccur_stats,
     build_global_popularity,
     build_item_feature_transition_stats,
@@ -68,6 +69,12 @@ def parse_args():
         type=str,
         default="1.0",
         help="逗号分隔的历史共现近因衰减系数，1.0表示不衰减",
+    )
+    parser.add_argument(
+        "--cooccur_formulas",
+        type=str,
+        default="log_count",
+        help="逗号分隔的历史共现打分公式",
     )
     parser.add_argument(
         "--strategies",
@@ -163,6 +170,7 @@ def main():
     seq_cols = parse_csv_arg(args.seq_cols)
     recent_ns = parse_int_csv_arg(args.recent_ns)
     cooccur_decays = parse_float_csv_arg(args.cooccur_decays)
+    cooccur_formulas = parse_csv_arg(args.cooccur_formulas)
     strategies = parse_csv_arg(args.strategies)
     history_filters = parse_csv_arg(args.history_filters)
     user_weights = parse_float_csv_arg(args.user_weights)
@@ -211,6 +219,7 @@ def main():
     print(f"seq_cols={seq_cols}")
     print(f"recent_ns={recent_ns}")
     print(f"cooccur_decays={cooccur_decays}")
+    print(f"cooccur_formulas={cooccur_formulas}")
     print(f"strategies={strategies}")
     print(f"history_filters={history_filters}")
     print(
@@ -240,7 +249,7 @@ def main():
             if args.test_like_eval else val_df
         )
         for recent_n in recent_ns:
-            cooccur_stats = build_cooccur_stats(fit_df, seq_col, recent_n=recent_n)
+            cooccur_count_stats = build_cooccur_stats(fit_df, seq_col, recent_n=recent_n)
             item_lookup = None
             item_feature_stats = None
             item_feature_recent_n = args.item_feature_recent_n if args.item_feature_recent_n > 0 else recent_n
@@ -258,55 +267,69 @@ def main():
                     for user_weight in user_weights:
                         for user_combo_weight in user_combo_weights:
                             for item_feature_weight in item_feature_weights:
-                                for cooccur_decay in cooccur_decays:
-                                    for pop_penalty_weight in pop_penalty_weights:
-                                        for history_count_weight in history_count_weights:
-                                            metrics = evaluate_strategy(
-                                                val_df=eval_val_df,
-                                                seq_col=seq_col,
-                                                candidate_items=candidate_items,
-                                                global_pop=global_pop,
-                                                cooccur_stats=cooccur_stats,
-                                                topk=args.topk,
-                                                strategy=strategy,
-                                                history_filter=history_filter,
-                                                recent_n=recent_n,
-                                                user_lookup=user_lookup,
-                                                user_profile_stats=user_profile_stats,
-                                                user_combo_profile_stats=user_combo_profile_stats,
-                                                item_lookup=item_lookup,
-                                                item_feature_stats=item_feature_stats,
-                                                user_cols=user_cols,
-                                                item_feature_cols=item_feature_cols,
-                                                user_weight=user_weight,
-                                                user_combo_weight=user_combo_weight,
-                                                user_combo_mode=args.user_combo_mode,
-                                                user_combo_min_count=args.user_combo_min_count,
-                                                item_feature_weight=item_feature_weight,
-                                                item_feature_recent_n=item_feature_recent_n,
-                                                item_feature_min_count=args.item_feature_min_count,
-                                                cooccur_decay=cooccur_decay,
-                                                pop_penalty_weight=pop_penalty_weight,
-                                                history_count_weight=history_count_weight,
-                                            )
-                                            add_weighted_metrics(metrics, bucket_weights)
-                                            metrics["seq_col"] = seq_col
-                                            metrics["recent_n"] = recent_n
-                                            metrics["item_feature_recent_n"] = item_feature_recent_n
-                                            metrics["test_like_eval"] = args.test_like_eval
-                                            results.append(metrics)
+                                for cooccur_formula in cooccur_formulas:
+                                    if cooccur_formula == "log_count":
+                                        cooccur_stats = cooccur_count_stats
+                                        cooccur_score_mode = "log_count"
+                                    else:
+                                        cooccur_stats = build_cooccur_score_stats(
+                                            cooccur_stats=cooccur_count_stats,
+                                            global_pop=global_pop,
+                                            formula=cooccur_formula,
+                                        )
+                                        cooccur_score_mode = "precomputed"
+                                    for cooccur_decay in cooccur_decays:
+                                        for pop_penalty_weight in pop_penalty_weights:
+                                            for history_count_weight in history_count_weights:
+                                                metrics = evaluate_strategy(
+                                                    val_df=eval_val_df,
+                                                    seq_col=seq_col,
+                                                    candidate_items=candidate_items,
+                                                    global_pop=global_pop,
+                                                    cooccur_stats=cooccur_stats,
+                                                    topk=args.topk,
+                                                    strategy=strategy,
+                                                    history_filter=history_filter,
+                                                    recent_n=recent_n,
+                                                    user_lookup=user_lookup,
+                                                    user_profile_stats=user_profile_stats,
+                                                    user_combo_profile_stats=user_combo_profile_stats,
+                                                    item_lookup=item_lookup,
+                                                    item_feature_stats=item_feature_stats,
+                                                    user_cols=user_cols,
+                                                    item_feature_cols=item_feature_cols,
+                                                    user_weight=user_weight,
+                                                    user_combo_weight=user_combo_weight,
+                                                    user_combo_mode=args.user_combo_mode,
+                                                    user_combo_min_count=args.user_combo_min_count,
+                                                    item_feature_weight=item_feature_weight,
+                                                    item_feature_recent_n=item_feature_recent_n,
+                                                    item_feature_min_count=args.item_feature_min_count,
+                                                    cooccur_decay=cooccur_decay,
+                                                    cooccur_score_mode=cooccur_score_mode,
+                                                    pop_penalty_weight=pop_penalty_weight,
+                                                    history_count_weight=history_count_weight,
+                                                )
+                                                add_weighted_metrics(metrics, bucket_weights)
+                                                metrics["seq_col"] = seq_col
+                                                metrics["recent_n"] = recent_n
+                                                metrics["cooccur_formula"] = cooccur_formula
+                                                metrics["item_feature_recent_n"] = item_feature_recent_n
+                                                metrics["test_like_eval"] = args.test_like_eval
+                                                results.append(metrics)
 
     if not results:
         raise RuntimeError("没有产生任何网格搜索结果，请检查参数配置")
 
     results = sorted(results, key=lambda item: item[args.sort_metric], reverse=True)
 
-    print("排名 | seq_col        | recent_n | strategy  | filter | decay | user_w | combo_w | item_w | hist_w | pop_pen | NDCG@10  | WNDCG@10 | Hit@10   | MRR")
-    print("-" * 168)
+    print("排名 | seq_col        | recent_n | strategy  | filter | formula    | decay | user_w | combo_w | item_w | hist_w | pop_pen | NDCG@10  | WNDCG@10 | Hit@10   | MRR")
+    print("-" * 182)
     for rank, item in enumerate(results[:args.top_results], start=1):
         print(
             f"{rank:>4} | {item['seq_col']:<14} | {item['recent_n']:>8} | "
             f"{item['strategy']:<9} | {item['history_filter']:<6} | "
+            f"{item.get('cooccur_formula', 'log_count'):<10} | "
             f"{item.get('cooccur_decay', 1.0):<5.2f} | "
             f"{item['user_weight']:<6.3f} | {item.get('user_combo_weight', 0.0):<7.3f} | "
             f"{item.get('item_feature_weight', 0.0):<6.3f} | "
@@ -321,6 +344,7 @@ def main():
         "最佳参数: "
         f"seq_col={best['seq_col']}, recent_n={best['recent_n']}, "
         f"strategy={best['strategy']}, history_filter={best['history_filter']}, "
+        f"cooccur_formula={best.get('cooccur_formula', 'log_count')}, "
         f"cooccur_decay={best.get('cooccur_decay', 1.0)}, "
         f"user_weight={best['user_weight']}, user_combo_weight={best.get('user_combo_weight', 0.0)}, "
         f"user_combo_mode={best.get('user_combo_mode', args.user_combo_mode)}, "
