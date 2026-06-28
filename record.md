@@ -3736,3 +3736,60 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp047_a1_true_multisplit_train.sh
 
 - 如果真多 split 的均值仍接近或超过 `0.70`，说明 A1 还有继续训练/集成空间。
 - 如果只有 split=42 高、其他 split 明显低，说明 A1 当前验证方式对线上不可靠，应谨慎提交 A1 替换。
+
+运行结果：
+
+| candidate | n | mean_cs | min_cs | max_cs | std | mean_train | 结论 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `gat_h256_heads4_seed2026` | 3 | 0.698935 | 0.694977 | 0.705936 | 0.004965 | 0.695282 | 最稳定，适合作为 A1 下一阶段主模型 |
+| `gcn_h384_seed777` | 3 | 0.693151 | 0.684018 | 0.706849 | 0.009864 | 0.679756 | 有补充价值，但稳定性弱于 GAT |
+
+复盘：
+
+- Exp-047 证明 Exp-046 的 `0.91+` 多 split 均值是训练泄漏造成的，不能作为泛化证据。
+- 真实多 split 重训后，当前 A1 路线稳定水平约 `0.70`，比线上 `0.6874` 有继续提升空间，但距离第一名 A1 `0.76845` 仍有明显差距。
+- 下一步不应继续只在 split=42 上做小幅 C&S 搜索，而应尝试“正式提交式全标签训练”：用多 split 决定结构和 epoch，再用全部 `train_idx` 标签重训最终模型。
+
+---
+
+## Tool-015：Exp-048 A1 全标签最终重训候选
+
+日期：2026-06-28
+
+目标：
+
+- 解决 A1 提交模型仍只用约 90% 标签训练的问题。
+- 在不改变 A2 的前提下，只尝试提升 A1，避免提交结果难以归因。
+
+修改文件：
+
+- `framework/code/train.py`
+  - 新增 `--train_all_labels`：Task1 使用全部 `train_idx` 标签训练，不再保留验证集。
+  - 新增 `--disable_early_stop`：完整训练到指定 `--epochs`，用于最终固定 epoch 重训。
+  - 普通训练默认行为不变，仍然按验证集早停。
+- `framework/scripts/run_exp048_a1_full_label_final.sh`
+  - 训练 GAT 全标签模型：`gat_sparse h256 heads4 seed2026 epoch=270`。
+  - 训练 GCN 全标签模型：`gcn h256 seed777 epoch=120`。
+  - 使用 `GAT:GCN = 0.95:0.05` 做 logits 加权，再执行固定 C&S。
+  - A2 沿用当前线上最佳 Exp-044。
+
+原理：
+
+- 线下调参必须保留验证集，否则无法判断模型是否泛化。
+- 但正式提交时，验证集标签也是已知训练标签，继续丢弃会减少监督信号。
+- 多 split 审计已经告诉我们 GAT 最优 epoch 大致在 `244-283`，因此正式重训取中位附近 `270`，用全部标签训练固定轮数。
+- GCN 只给 `0.05` 权重，是为了补一点模型多样性，不让它主导结果。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp048_a1_full_label_final.sh
+```
+
+当前状态：
+
+- 已通过语法检查：
+  - `python3 -m py_compile framework/code/train.py framework/code/a1_correct_smooth.py framework/code/validate_submission.py`
+  - `bash -n framework/scripts/run_exp048_a1_full_label_final.sh`
+- 等待 GPU 运行结果，不建议在结果未知时提交。

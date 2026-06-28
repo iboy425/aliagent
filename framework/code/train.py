@@ -110,6 +110,10 @@ def parse_args():
                         help='Task1类别权重策略，balanced用于缓解类别不均衡')
     parser.add_argument('--stratified_split', action='store_true',
                         help='使用分层划分')
+    parser.add_argument('--train_all_labels', action='store_true',
+                        help='Task1最终训练模式：使用全部train_idx标签训练，不再保留验证集')
+    parser.add_argument('--disable_early_stop', action='store_true',
+                        help='关闭早停，完整训练到--epochs；适合最终全标签重训')
 
     # 其他
     parser.add_argument('--seed', type=int, default=42,
@@ -162,7 +166,14 @@ def train_task1(args):
     # 2. 划分训练/验证集
     split_seed = args.seed if args.split_seed is None else args.split_seed
     logging.info(f"验证集划分随机种子: {split_seed}")
-    if args.stratified_split:
+    validation_disabled = bool(args.train_all_labels)
+    if args.train_all_labels:
+        train_idx = data['train_idx']
+        # 最终训练没有真实验证集。这里复用训练索引作为监控集合，只用于日志、
+        # 学习率调度和保存检查点，不把该数值当作线下泛化指标。
+        val_idx = data['train_idx']
+        logging.info("启用最终全标签训练：全部train_idx参与损失计算，验证指标仅作训练监控")
+    elif args.stratified_split:
         train_idx, val_idx = stratified_split(
             data['labels'], data['train_idx'], args.val_ratio, split_seed
         )
@@ -277,8 +288,12 @@ def train_task1(args):
         model.eval()
         with torch.no_grad():
             logits = model(features, adj)
-            val_loss = criterion(logits[val_idx_t], labels[val_idx_t]).item()
-            val_acc = compute_accuracy(logits[val_idx_t], labels[val_idx_t])
+            if validation_disabled:
+                val_loss = loss.item()
+                val_acc = train_acc
+            else:
+                val_loss = criterion(logits[val_idx_t], labels[val_idx_t]).item()
+                val_acc = compute_accuracy(logits[val_idx_t], labels[val_idx_t])
 
         # 更新学习率
         scheduler.step(val_acc)
@@ -316,7 +331,8 @@ def train_task1(args):
             torch.save(save_dict, best_path)
 
         # 早停检查
-        early_stop(val_acc, epoch)
+        if not args.disable_early_stop:
+            early_stop(val_acc, epoch)
         if early_stop.early_stop:
             logging.info(f"早停触发! 最优验证准确率: {best_val_acc:.4f} (Epoch {best_epoch})")
             break
