@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from datasets import GraphDataset
 from utils import get_device
 from a1_correct_smooth import correct_and_smooth, normalize_score_rows, _prepare_cs_adj
-from a1_sign_mlp import SignMLP, build_sign_features
+from a1_sign_mlp import SignMLP, build_model_features
 
 
 def parse_args():
@@ -73,7 +73,7 @@ def load_sign_probs(data: Dict, checkpoint_path: str, device: torch.device) -> t
     args = _namespace_from_dict(checkpoint["args"])
     args.device = str(device)
 
-    x = build_sign_features(data, args, device)
+    x = build_model_features(data, args, data["train_idx"], device)
     model = SignMLP(
         in_dim=int(checkpoint.get("input_dim", x.size(1))),
         hidden_dim=int(args.hidden_dim),

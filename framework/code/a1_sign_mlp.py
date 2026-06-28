@@ -98,6 +98,17 @@ def parse_args():
                         help="原始节点特征归一化方式")
     parser.add_argument("--block_norm", action="store_true",
                         help="对每一跳传播特征做行L2归一化，降低高阶传播尺度差异")
+    parser.add_argument("--label_feature_hops", type=int, default=0,
+                        help="标签传播特征跳数；0表示关闭")
+    parser.add_argument("--label_feature_norm", type=str, default="random_walk",
+                        choices=["symmetric", "random_walk"],
+                        help="标签传播特征使用的邻接矩阵归一化方式")
+    parser.add_argument("--label_feature_include_seed", action="store_true",
+                        help="是否把原始标签one-hot种子Y0拼入特征；默认只拼1..H跳传播结果")
+    parser.add_argument("--label_feature_row_norm", action="store_true",
+                        help="是否对每一跳标签传播特征做行归一化")
+    parser.add_argument("--label_feature_weight", type=float, default=1.0,
+                        help="标签传播特征整体缩放权重")
 
     parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--num_layers", type=int, default=2)
@@ -122,12 +133,13 @@ def _parse_float_list(value: str) -> List[float]:
     return [float(item.strip()) for item in value.split(",") if item.strip()]
 
 
-def _make_adj(data: Dict, args, device: torch.device) -> torch.Tensor:
-    """构造SIGN传播矩阵"""
+def _make_adj(data: Dict, args, device: torch.device, norm_type: str = None) -> torch.Tensor:
+    """构造传播矩阵"""
     adj = data["adj"]
     if args.graph_mode == "undirected":
         adj = ((adj + adj.T) > 0).astype(np.float32).tocsr()
-    if args.prop_norm == "symmetric":
+    norm_type = args.prop_norm if norm_type is None else norm_type
+    if norm_type == "symmetric":
         return normalize_adj_sparse(adj, device=device)
     return random_walk_normalize_sparse(adj, device=device)
 
@@ -156,6 +168,60 @@ def build_sign_features(data: Dict, args, device: torch.device) -> torch.Tensor:
         if hop < args.hops:
             current = torch.sparse.mm(adj, current)
     return torch.cat(blocks, dim=1)
+
+
+def build_label_features(
+    data: Dict,
+    args,
+    label_idx: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """构造训练标签传播特征
+
+    训练/验证审计时，`label_idx` 必须是当前 split 的训练节点，不能包含验证节点。
+    正式推理时才使用全部 `train_idx`。
+    """
+    label_feature_hops = int(getattr(args, "label_feature_hops", 0))
+    if label_feature_hops <= 0:
+        return None
+
+    labels_np = data["labels"]
+    num_nodes = labels_np.shape[0]
+    num_classes = data["num_classes"]
+    seed = torch.zeros((num_nodes, num_classes), dtype=torch.float32, device=device)
+    label_idx_t = torch.LongTensor(label_idx).to(device)
+    label_values = torch.LongTensor(labels_np[label_idx]).to(device)
+    seed[label_idx_t] = F.one_hot(label_values, num_classes=num_classes).float()
+
+    label_feature_norm = getattr(args, "label_feature_norm", "random_walk")
+    adj = _make_adj(data, args, device, norm_type=label_feature_norm)
+    current = seed
+    blocks = []
+    if bool(getattr(args, "label_feature_include_seed", False)):
+        blocks.append(seed)
+    for _ in range(label_feature_hops):
+        current = torch.sparse.mm(adj, current)
+        block = current
+        if bool(getattr(args, "label_feature_row_norm", False)):
+            block = normalize_score_rows(block)
+        blocks.append(block)
+    if not blocks:
+        return None
+    return torch.cat(blocks, dim=1) * float(getattr(args, "label_feature_weight", 1.0))
+
+
+def build_model_features(
+    data: Dict,
+    args,
+    label_idx: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """构造最终送入MLP的特征"""
+    x = build_sign_features(data, args, device)
+    label_features = build_label_features(data, args, label_idx, device)
+    if label_features is not None:
+        x = torch.cat([x, label_features], dim=1)
+    return x
 
 
 def split_indices(data: Dict, args) -> Tuple[np.ndarray, np.ndarray]:
@@ -238,10 +304,17 @@ def train_and_eval(args):
         f"hops={args.hops}, prop_norm={args.prop_norm}, graph_mode={args.graph_mode}, "
         f"feature_norm={args.feature_norm}, block_norm={args.block_norm}"
     )
+    print(
+        f"label_feature_hops={args.label_feature_hops}, "
+        f"label_feature_norm={args.label_feature_norm}, "
+        f"label_feature_include_seed={args.label_feature_include_seed}, "
+        f"label_feature_row_norm={args.label_feature_row_norm}, "
+        f"label_feature_weight={args.label_feature_weight}"
+    )
     print(f"train={len(train_idx)}, val={len(val_idx)}, split_seed={args.split_seed}, seed={args.seed}")
 
-    x = build_sign_features(data, args, device)
     labels = torch.LongTensor(data["labels"]).to(device)
+    x = build_model_features(data, args, train_idx, device)
     train_idx_t = torch.LongTensor(train_idx).to(device)
     val_idx_t = torch.LongTensor(val_idx).to(device)
 
@@ -327,19 +400,19 @@ def train_and_eval(args):
 
     if args.output_path:
         best = cs_rows[0]
-        infer_with_full_labels(data, model, x, labels, best, args, device)
+        infer_with_full_labels(data, model, labels, best, args, device)
 
 
 def infer_with_full_labels(
     data: Dict,
     model: nn.Module,
-    x: torch.Tensor,
     labels: torch.Tensor,
     params: Dict,
     args,
     device: torch.device,
 ):
     """使用全部训练标签C&S并生成A1.csv"""
+    x = build_model_features(data, args, data["train_idx"], device)
     model.eval()
     with torch.no_grad():
         probs = normalize_score_rows(F.softmax(model(x), dim=1))

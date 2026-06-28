@@ -4036,3 +4036,85 @@ Smoke 观察：
 
 - 单 split 上 `sign_rw:0.85 + gat:0.15` 达到 `0.725114`，高于该 split 单 SIGN 的 `0.718721`。
 - 这只是单 split 现象，必须等完整 5 split 均值后才能决定是否提交。
+
+运行结果：
+
+| candidate | n | mean | min | std | smooth |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sign_rw:0.85+gat:0.15` | 5 | 0.724749 | 0.718721 | 0.003770 | 0.75 |
+| `sign_rw:0.85+gat:0.15` | 5 | 0.724749 | 0.718721 | 0.005498 | 0.5 |
+| `sign_rw:0.85+gcn:0.15` | 5 | 0.724018 | 0.714155 | 0.008899 | 0.75 |
+| `sign_rw:1` | 5 | 0.723653 | 0.712329 | 0.009484 | 0.75 |
+
+结论：
+
+- 异构融合没有超过 Exp-050 单 SIGN 最强均值 `0.725297`。
+- 不生成 Exp052 提交包。
+- 下一步需要改输入/模型结构，而不是继续调 SIGN/GAT/GNN 融合权重。
+
+---
+
+## Tool-020：Exp-053 A1 SIGN + 标签传播特征审计
+
+日期：2026-06-28
+
+目标：
+
+- 做比 ensemble 权重更大的模型输入升级。
+- 将训练标签沿图传播后的分布作为 MLP 输入特征，与 SIGN 属性传播特征拼接。
+- 验证标签信息是否应该进入模型训练阶段，而不是只在最后 C&S 阶段使用。
+
+修改文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 新增 `--label_feature_hops`。
+  - 新增 `--label_feature_norm`。
+  - 新增 `--label_feature_include_seed`。
+  - 新增 `--label_feature_row_norm`。
+  - 新增 `--label_feature_weight`。
+  - 训练/验证时只用当前 split 的训练节点标签构造标签传播特征，避免验证泄漏。
+  - 正式推理时使用全部 `train_idx` 标签构造标签传播特征。
+- `framework/code/a1_sign_infer.py`
+  - 更新为通过 `build_model_features()` 构造输入。
+  - 兼容旧 SIGN checkpoint；旧模型默认 `label_feature_hops=0`，输出不变。
+- `framework/scripts/run_exp053_a1_sign_label_feature_audit.sh`
+  - 默认 6 组标签特征配置 x 5 个 split。
+
+默认审计配置：
+
+- 基础属性特征：
+  - `hops=5`
+  - `prop_norm=random_walk`
+  - `graph_mode=undirected`
+  - `block_norm=True`
+- 标签特征候选：
+  - `labelrw_h2_w1`
+  - `labelrw_h3_w1`
+  - `labelrw_h5_w1`
+  - `labelrw_h3_rownorm_w1`
+  - `labelsym_h3_w1`
+  - `labelrw_h3_w05`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp053_a1_sign_label_feature_audit.sh
+```
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py`
+- `bash -n framework/scripts/run_exp053_a1_sign_label_feature_audit.sh`
+- CPU smoke test：
+  - `label_feature_hops=2`
+  - `epochs=1`
+  - 主流程已走通。
+- Exp051 旧 checkpoint 兼容性验证：
+  - 重新运行 `build_exp051_a1_sign_ensemble_candidate.sh`。
+  - A1 类别分布保持 `{0: 55, 1: 336, 2: 258, 3: 61, 4: 1288, 5: 52, 6: 46, 7: 137, 8: 481, 9: 37}`。
+
+判断标准：
+
+- 如果 Exp-053 均值明显超过 `0.725297`，进入下一轮提交候选。
+- 如果低于 Exp-050，说明标签传播更适合作为 C&S 后处理，不适合直接拼进 MLP 输入。
