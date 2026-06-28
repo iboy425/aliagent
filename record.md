@@ -3976,3 +3976,63 @@ DEVICE=cpu ./scripts/build_exp051_a1_sign_ensemble_candidate.sh
 - 这是目前最值得提交的候选。
 - 预期主要提升 A1；A2 应接近 Exp-044 的线上 `0.50230`。
 - 风险：SIGN 五折集成的本地评估不能直接验证，因为多个 split checkpoint 对任意固定验证集都有训练重叠；但其单模型多 split 无泄漏均值已经显著强于旧 A1 路线。
+
+线上结果：
+
+- 提交时间：`2026-06-28 16:56:12`
+- 总分：`0.6070`
+- A1 分类分数：`0.7117`
+- A2 推荐分数：`0.5023`
+
+复盘：
+
+- Exp-051 是有效提交，总分从 Exp-044 的 `0.59484` 提升到 `0.6070`。
+- A1 从 `0.68739` 提升到 `0.7117`，确认 SIGN 路线在线上有效。
+- A2 与 Exp-044 一致，说明推荐任务没有退化。
+- 但 A1 线上 `0.7117` 仍低于 Exp-050 最强配置无泄漏均值 `0.725297`，可能存在 split 集成分布偏移或 C&S 固定参数不完全匹配。
+- 下一步优先做异构融合：SIGN-rw + SIGN-row/SIGN-sym + GAT/GCN，而不是只微调单个 SIGN 参数。
+
+---
+
+## Tool-019：Exp-052 A1 异构模型融合无泄漏审计
+
+日期：2026-06-28
+
+目标：
+
+- 在不重新训练的情况下，复用已有 checkpoint，检查异构模型融合能否超过单 SIGN。
+- 每个 split 只使用同 split 下训练的模型，在该 split 验证集上评估，避免训练泄漏。
+
+新增文件：
+
+- `framework/code/a1_mixed_ensemble_audit.py`
+  - 支持加载 SIGN checkpoint 和 GNN checkpoint。
+  - 对每个 split 计算模型概率。
+  - 搜索少量有解释性的融合权重组合。
+  - 对融合概率执行 C&S 并汇总 mean/min/std。
+- `framework/scripts/run_exp052_a1_mixed_ensemble_audit.sh`
+  - 默认 split：`42,777,2024,2026,3407`
+  - 默认融合模型：
+    - `sign_rw`
+    - `sign_sym`
+    - `sign_row`
+    - `gat`
+    - `gcn`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp052_a1_mixed_ensemble_audit.sh
+```
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_mixed_ensemble_audit.py framework/code/a1_sign_infer.py framework/code/a1_sign_mlp.py`
+- `bash -n framework/scripts/run_exp052_a1_mixed_ensemble_audit.sh`
+- CPU smoke test：`SPLIT_SEEDS=42` 已成功输出汇总。
+
+Smoke 观察：
+
+- 单 split 上 `sign_rw:0.85 + gat:0.15` 达到 `0.725114`，高于该 split 单 SIGN 的 `0.718721`。
+- 这只是单 split 现象，必须等完整 5 split 均值后才能决定是否提交。
