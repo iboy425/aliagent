@@ -3488,3 +3488,59 @@ GPU训练结果：
 - 模型融合是当前 A2 最强离线候选。
 - 下一步生成 `model_weight=1.0` 的 A2 融合提交包，A1 先沿用 Exp-030 的线上稳定版本。
 - 后续继续做多 seed 模型训练，验证 `model_weight=1.0` 是否稳定。
+
+线上提交结果：
+
+- 提交日期：2026-06-28
+- 总分：`0.59484`
+- A1 分类分数：`0.68739`
+- A2 推荐分数：`0.50230`
+
+线上结论：
+
+- Exp-044 是当前最高线上总分。
+- A2 从 Exp-030 的 `0.4746` 提升到 `0.50230`，线上提升约 `+0.02770`。
+- A2 距离当前第一名 `0.50967` 只差约 `0.00737`，继续优化 A2 仍有价值。
+- A1 仍停在 `0.68739`，距离第一名 `0.76845` 差约 `0.08106`，后续总分冲第一必须重新攻 A1。
+
+---
+
+## Tool-011：A2 feature ranker 多 seed 融合脚本
+
+日期：2026-06-28
+
+目标：
+
+- 在 Exp-044 单 seed 模型融合线上有效的基础上，训练多个 seed 的 feature ranker。
+- 对多个 checkpoint 的 logits 做平均，再与 jaccard 规则融合。
+- 如果多 seed 离线优于单 seed，生成新的 `prediction.zip` 候选。
+
+新增文件：
+
+- `framework/scripts/run_exp045_a2_feature_multiseed.sh`
+
+默认配置：
+
+- seeds：`42,777,2024`
+- max_len：`120`
+- embedding_dim：`256`
+- user_embedding_dim：`16`
+- hidden_dim：`512`
+- dropout：`0.25`
+- epochs：`120`
+- patience：`20`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp045_a2_feature_multiseed.sh
+```
+
+预期输出：
+
+- `output/exp045_a2_feature_multiseed/seed*/best_model.pt`
+- `output/exp045_a2_feature_multiseed/fusion_eval.json`
+- 若最佳 `model_weight > 0`：
+  - `output/exp045_a2_feature_multiseed/A2.csv`
+  - `output/exp045_a2_feature_multiseed/prediction.zip`

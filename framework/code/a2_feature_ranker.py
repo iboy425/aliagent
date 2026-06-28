@@ -538,6 +538,38 @@ def load_ranker(checkpoint_path: str, device: torch.device) -> Tuple[A2FeatureRa
     return model, bundle
 
 
+def parse_checkpoint_paths(value: str) -> List[str]:
+    """解析 checkpoint 路径列表
+
+    支持两种写法：
+    - 单路径：`output/exp/best_model.pt`
+    - 逗号分隔多路径：`a.pt,b.pt,c.pt`
+    """
+    paths = [item.strip() for item in str(value).split(",") if item.strip()]
+    if not paths:
+        raise ValueError("至少需要一个checkpoint")
+    return paths
+
+
+def load_rankers(checkpoint_arg: str, device: torch.device) -> Tuple[List[A2FeatureRanker], A2FeatureBundle]:
+    """加载一个或多个排序模型，并校验特征映射一致"""
+    models = []
+    reference_bundle = None
+    for path in parse_checkpoint_paths(checkpoint_arg):
+        model, bundle = load_ranker(path, device)
+        if reference_bundle is None:
+            reference_bundle = bundle
+        else:
+            if bundle.target_items != reference_bundle.target_items:
+                raise ValueError(f"checkpoint target_items不一致: {path}")
+            if bundle.user_cols != reference_bundle.user_cols:
+                raise ValueError(f"checkpoint user_cols不一致: {path}")
+            if bundle.item2idx != reference_bundle.item2idx:
+                raise ValueError(f"checkpoint item映射不一致: {path}")
+        models.append(model)
+    return models, reference_bundle
+
+
 def parse_float_list(value: str) -> List[float]:
     """解析逗号分隔浮点数"""
     return [float(item.strip()) for item in str(value).split(",") if item.strip()]
@@ -548,9 +580,9 @@ def parse_int_list(value: str) -> List[int]:
     return [int(item.strip()) for item in str(value).split(",") if item.strip()]
 
 
-def score_dataframe_with_model(
+def score_dataframe_with_models(
     df: pd.DataFrame,
-    model: A2FeatureRanker,
+    models: Sequence[A2FeatureRanker],
     bundle: A2FeatureBundle,
     user_lookup: pd.DataFrame,
     seq_col: str,
@@ -558,7 +590,11 @@ def score_dataframe_with_model(
     batch_size: int,
     device: torch.device,
 ) -> List[Dict[str, float]]:
-    """为DataFrame中每行生成模型 item 分数"""
+    """为DataFrame中每行生成模型 item 分数
+
+    当传入多个模型时，直接平均 logits。这里不先转概率，避免 softmax
+    抹平不同模型对排序间隔的判断。
+    """
     all_scores: List[Dict[str, float]] = []
     with torch.no_grad():
         for start in range(0, len(df), batch_size):
@@ -573,7 +609,11 @@ def score_dataframe_with_model(
             seq_t = torch.tensor(seqs, dtype=torch.long, device=device)
             user_t = torch.tensor(user_feats, dtype=torch.long, device=device)
             len_t = torch.tensor(lens, dtype=torch.long, device=device)
-            logits = model(seq_t, user_t, len_t).detach().cpu().numpy()
+            logits_sum = None
+            for model in models:
+                logits = model(seq_t, user_t, len_t)
+                logits_sum = logits if logits_sum is None else logits_sum + logits
+            logits = (logits_sum / max(len(models), 1)).detach().cpu().numpy()
             for row_scores in logits:
                 all_scores.append({
                     bundle.target_items[i]: float(score)
@@ -737,7 +777,7 @@ def eval_fusion(args):
     """离线评估模型分数与 jaccard 规则融合"""
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    model, bundle = load_ranker(args.checkpoint, device)
+    models, bundle = load_rankers(args.checkpoint, device)
 
     train_df = pd.read_csv(os.path.join(args.data_path, "train.csv"))
     test_df = pd.read_csv(os.path.join(args.data_path, "test.csv"))
@@ -753,9 +793,9 @@ def eval_fusion(args):
 
     user_lookup = user_df.set_index("uid")
     rule_context = build_rule_context(args, fit_df, user_df, item_df, seq_col)
-    model_scores = score_dataframe_with_model(
+    model_scores = score_dataframe_with_models(
         val_df,
-        model,
+        models,
         bundle,
         user_lookup,
         seq_col,
@@ -798,7 +838,7 @@ def eval_fusion(args):
 def predict_fusion(args):
     """生成模型 + jaccard 规则融合的 A2 提交文件"""
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    model, bundle = load_ranker(args.checkpoint, device)
+    models, bundle = load_rankers(args.checkpoint, device)
 
     train_df = pd.read_csv(os.path.join(args.data_path, "train.csv"))
     test_df = pd.read_csv(os.path.join(args.data_path, "test.csv"))
@@ -809,9 +849,9 @@ def predict_fusion(args):
 
     user_lookup = user_df.set_index("uid")
     rule_context = build_rule_context(args, train_df, user_df, item_df, train_seq_col)
-    model_scores = score_dataframe_with_model(
+    model_scores = score_dataframe_with_models(
         test_df,
-        model,
+        models,
         bundle,
         user_lookup,
         seq_col,
