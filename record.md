@@ -3793,3 +3793,54 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp048_a1_full_label_final.sh
   - `python3 -m py_compile framework/code/train.py framework/code/a1_correct_smooth.py framework/code/validate_submission.py`
   - `bash -n framework/scripts/run_exp048_a1_full_label_final.sh`
 - 等待 GPU 运行结果，不建议在结果未知时提交。
+
+GPU返回结果：
+
+- `a1_correct_smooth.py` 显示模型原始验证准确率 `0.979909`。
+- C&S 后监控准确率为 `0.953425`。
+- 生成候选包：`output/exp048_a1_full_label_final/prediction.zip`。
+- A1 类别分布：`{0: 71, 1: 388, 2: 263, 3: 80, 4: 1198, 5: 42, 6: 73, 7: 136, 8: 464, 9: 36}`。
+
+复盘：
+
+- 这个 `0.979909` 不是有效验证分数。
+- 原因：Exp-048 使用全部 `train_idx` 训练，随后 C&S 脚本再从 `train_idx` 切验证集，验证节点已经参与过训练，发生训练泄漏。
+- 因此 Exp-048 当前只能证明“全标签模型能生成格式正确的提交包”，不能证明线上会显著提升。
+- 在没有无泄漏审计之前，不建议提交 Exp-048。
+
+---
+
+## Tool-016：Exp-049 固定 epoch 无泄漏审计
+
+日期：2026-06-28
+
+目标：
+
+- 用不泄漏的方式模拟 Exp-048 的训练方式。
+- 判断“固定 epoch + 最终全标签训练”是否真的可能提升 A1，而不是只因为验证集泄漏看起来很高。
+
+修改文件：
+
+- `framework/code/train.py`
+  - 新增 `--scheduler {plateau,none}`。
+  - `--scheduler none` 用于固定 epoch 审计，避免学习率调度器偷看验证集。
+- `framework/scripts/run_exp048_a1_full_label_final.sh`
+  - 正式全标签训练也改为 `--scheduler none`，避免用训练内监控驱动学习率产生不稳定行为。
+- `framework/scripts/run_exp049_a1_fixed_epoch_no_leak_audit.sh`
+  - 每个 split 保留 10% 验证节点不参与训练。
+  - 训练策略模拟 Exp-048：固定 epoch、关闭早停、关闭学习率调度。
+  - 审计两个候选：
+    - `gat_only`
+    - `gat_gcn_95_5`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp049_a1_fixed_epoch_no_leak_audit.sh
+```
+
+判断标准：
+
+- 如果 Exp-049 的无泄漏均值明显高于 Exp-047 的 `gat_h256_heads4_seed2026 mean=0.698935`，说明 Exp-048 路线值得继续。
+- 如果均值接近或低于 Exp-047，则 Exp-048 不应提交，应继续寻找新的 A1 结构或后处理。

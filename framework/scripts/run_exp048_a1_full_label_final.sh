@@ -73,6 +73,7 @@ train_full() {
     --class_weight none \
     --train_all_labels \
     --disable_early_stop \
+    --scheduler none \
     --seed "$seed" \
     --device "$DEVICE" \
     --log_interval 20

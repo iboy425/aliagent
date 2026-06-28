@@ -114,6 +114,9 @@ def parse_args():
                         help='Task1最终训练模式：使用全部train_idx标签训练，不再保留验证集')
     parser.add_argument('--disable_early_stop', action='store_true',
                         help='关闭早停，完整训练到--epochs；适合最终全标签重训')
+    parser.add_argument('--scheduler', type=str, default='plateau',
+                        choices=['plateau', 'none'],
+                        help='学习率调度策略；none用于固定epoch审计，避免验证集反馈影响训练')
 
     # 其他
     parser.add_argument('--seed', type=int, default=42,
@@ -247,9 +250,12 @@ def train_task1(args):
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     # 学习率调度器 - Agent可以修改调度策略
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=args.patience // 3
-    )
+    if args.scheduler == 'plateau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=args.patience // 3
+        )
+    else:
+        scheduler = None
     if args.class_weight == 'balanced':
         train_labels = labels[train_idx_t]
         counts = torch.bincount(train_labels, minlength=num_classes).float()
@@ -295,8 +301,9 @@ def train_task1(args):
                 val_loss = criterion(logits[val_idx_t], labels[val_idx_t]).item()
                 val_acc = compute_accuracy(logits[val_idx_t], labels[val_idx_t])
 
-        # 更新学习率
-        scheduler.step(val_acc)
+        # 更新学习率。固定epoch审计可关闭调度器，避免验证集反馈影响训练过程。
+        if scheduler is not None:
+            scheduler.step(val_acc)
 
         # 记录指标
         tracker.update(
