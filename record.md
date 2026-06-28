@@ -3679,3 +3679,60 @@ Exp045 w35 相对 Exp044 的差异：
 cd /home/aliagent/framework
 CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp046_a1_multisplit_audit.sh
 ```
+
+运行结果：
+
+| candidate | n | mean_cs | min_cs | range | std | mean_model | mean_gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| exp019_top5_fixed_cs | 5 | 0.918174 | 0.700457 | 0.279452 | 0.108927 | 0.915982 | +0.002192 |
+| exp039_greedy_fixed_cs | 5 | 0.914703 | 0.713242 | 0.258447 | 0.100791 | 0.913425 | +0.001279 |
+| exp033_gat_gcn_95_5_fixed_cs | 5 | 0.901735 | 0.711416 | 0.247489 | 0.095317 | 0.900091 | +0.001644 |
+
+复盘：
+
+- 该审计结果不能直接作为 A1 泛化证据。
+- 原因：这些 checkpoint 大多是按 `split_seed=42` 训练得到的。拿同一批 checkpoint 去评估其他 split 时，其他 split 的“验证节点”可能已经参与过原模型训练，导致 `0.94~0.98` 的虚高分数。
+- 因此 Exp-046 只能说明“固定 checkpoint 在 split=42 上的相对排序”，不能说明线上泛化。
+
+---
+
+## Tool-014：A1 真多 split 重训练审计脚本
+
+日期：2026-06-28
+
+目标：
+
+- 修正 Exp-046 的训练泄漏问题。
+- 对每个 split_seed 重新训练模型，再在同一个 split 上评估 C&S。
+- 先跑轻量代表模型，判断 A1 高分是否只来自固定 split 偶然性。
+
+新增文件：
+
+- `framework/scripts/run_exp047_a1_true_multisplit_train.sh`
+
+默认配置：
+
+- split seeds：`42,777,2024`
+- GCN 代表：
+  - `model_type=gcn`
+  - `hidden_dim=384`
+  - `seed=777`
+  - `normalize=symmetric`
+- GAT 代表：
+  - `model_type=gat_sparse`
+  - `hidden_dim=256`
+  - `heads=4`
+  - `seed=2026`
+  - `normalize=none`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp047_a1_true_multisplit_train.sh
+```
+
+判断标准：
+
+- 如果真多 split 的均值仍接近或超过 `0.70`，说明 A1 还有继续训练/集成空间。
+- 如果只有 split=42 高、其他 split 明显低，说明 A1 当前验证方式对线上不可靠，应谨慎提交 A1 替换。
