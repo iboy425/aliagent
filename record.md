@@ -3575,6 +3575,23 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp045_a2_feature_multiseed.sh
 - 如果还有提交机会，优先提交：
   - `framework/output/exp045_a2_feature_multiseed_w35/prediction.zip`
 
+线上提交结果：
+
+- 提交时间：2026-06-28 15:30:41
+- 总分：`0.5916`
+- A1 分类分数：`0.6874`
+- A2 推荐分数：`0.4957`
+
+线上结论：
+
+- Exp-045 多 seed / 高权重融合没有转化为线上提升。
+- 相比 Exp-044：
+  - 总分从 `0.59484` 降到 `0.5916`
+  - A2 从 `0.50230` 降到 `0.4957`
+- 说明当前 test-like holdout 仍然高估了多 seed 模型 logits 的收益。
+- Exp-045 系列暂时不作为默认提交方案；当前线上最佳仍为 Exp-044。
+- A2 后续若继续做，必须用线上反馈校准验证策略，不能只看 `weighted_NDCG`。
+
 ---
 
 ## Tool-012：A1 多 split 稳定性审计脚本
