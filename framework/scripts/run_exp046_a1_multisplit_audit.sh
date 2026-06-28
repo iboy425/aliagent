@@ -129,6 +129,7 @@ import glob
 import json
 import os
 import statistics
+import csv
 
 base = os.environ["OUT_DIR_FOR_SUMMARY"]
 rows = []
@@ -149,6 +150,7 @@ for candidate_dir in sorted(glob.glob(os.path.join(base, "*"))):
         "mean_cs": statistics.mean(vals),
         "min_cs": min(vals),
         "max_cs": max(vals),
+        "range_cs": max(vals) - min(vals),
         "std_cs": statistics.pstdev(vals) if len(vals) > 1 else 0.0,
         "mean_model": statistics.mean(bases),
         "mean_gain": statistics.mean(vals) - statistics.mean(bases),
@@ -161,6 +163,7 @@ for item in rows:
         f"n={item['n']}\t"
         f"mean_cs={item['mean_cs']:.6f}\t"
         f"min_cs={item['min_cs']:.6f}\t"
+        f"range={item['range_cs']:.6f}\t"
         f"std={item['std_cs']:.6f}\t"
         f"mean_model={item['mean_model']:.6f}\t"
         f"mean_gain={item['mean_gain']:+.6f}"
@@ -168,7 +171,15 @@ for item in rows:
 
 with open(os.path.join(base, "summary.json"), "w", encoding="utf-8") as f:
     json.dump(rows, f, ensure_ascii=False, indent=2)
+with open(os.path.join(base, "summary.csv"), "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=[
+        "candidate", "n", "mean_cs", "min_cs", "max_cs",
+        "range_cs", "std_cs", "mean_model", "mean_gain",
+    ])
+    writer.writeheader()
+    writer.writerows(rows)
 PY
 
 echo
 echo "审计结果：$OUT_DIR/summary.json"
+echo "审计表格：$OUT_DIR/summary.csv"
