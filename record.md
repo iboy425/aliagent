@@ -3844,3 +3844,66 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp049_a1_fixed_epoch_no_leak_audit.sh
 
 - 如果 Exp-049 的无泄漏均值明显高于 Exp-047 的 `gat_h256_heads4_seed2026 mean=0.698935`，说明 Exp-048 路线值得继续。
 - 如果均值接近或低于 Exp-047，则 Exp-048 不应提交，应继续寻找新的 A1 结构或后处理。
+
+运行结果：
+
+| variant | n | mean | min | max | std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `gat_gcn_95_5` | 5 | 0.698082 | 0.693151 | 0.703196 | 0.003680 |
+| `gat_only` | 5 | 0.695708 | 0.690411 | 0.702283 | 0.004060 |
+
+结论：
+
+- Exp-049 没有超过 Exp-047 的 GAT 真多 split 均值 `0.698935`。
+- Exp-048 的全标签候选不具备无泄漏提升证据，不建议提交。
+- A1 继续沿着“固定 epoch / 全标签重训”难以产生显著收益，应切换到新的模型族或图特征工程。
+
+---
+
+## Tool-017：Exp-050 A1 SIGN/MLP 多跳传播特征审计
+
+日期：2026-06-28
+
+目标：
+
+- 寻找比当前 GAT/GCN 更有互补性的 A1 模型族。
+- 当前训练边同质性约 `0.79`，说明图传播有价值；但两层 GCN/GAT 稳定水平卡在 `0.699` 左右。
+- SIGN 把 `X, AX, A^2X, ... A^KX` 直接拼接，再用 MLP 分类，能显式利用多跳邻域，训练也比 GAT 更快。
+
+新增文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 预计算多跳传播特征。
+  - 支持有向/无向图、对称/随机游走归一化、特征归一化、每跳特征行归一化。
+  - 训练 MLP 并执行轻量 C&S 搜索。
+  - 可选生成 `A1.csv`。
+- `framework/scripts/run_exp050_a1_sign_audit.sh`
+  - 默认跑 5 个 split：`42,777,2024,2026,3407`。
+  - 默认审计 5 组配置：
+    - `sign_sym_undir_k3_h512_l2_do04_none`
+    - `sign_sym_undir_k5_h512_l2_do04_none`
+    - `sign_sym_undir_k5_h512_l2_do04_block`
+    - `sign_rw_undir_k5_h512_l2_do04_block`
+    - `sign_sym_undir_k5_h512_l2_do04_rowblock`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp050_a1_sign_audit.sh
+```
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/train.py`
+- `bash -n framework/scripts/run_exp050_a1_sign_audit.sh`
+- CPU smoke test：
+  - `hops=1`
+  - `hidden_dim=32`
+  - `epochs=1`
+  - 主流程已走通。
+
+判断标准：
+
+- 如果某组 SIGN 的 `mean` 明显超过 `0.70`，下一步扩展为多 seed / 多配置 ensemble。
+- 如果所有 SIGN 配置仍在 `0.69` 左右，说明单纯多跳传播特征也不够，应继续尝试 APPNP/GCNII 或更激进的结构特征。
