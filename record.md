@@ -3544,3 +3544,65 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp045_a2_feature_multiseed.sh
 - 若最佳 `model_weight > 0`：
   - `output/exp045_a2_feature_multiseed/A2.csv`
   - `output/exp045_a2_feature_multiseed/prediction.zip`
+
+实验结果：
+
+- 单 seed：
+  - seed777：`epoch=54`, `ndcg=0.495881`, `hit=0.726500`, `mrr=0.423429`
+  - seed2024：`epoch=28`, `ndcg=0.492018`, `hit=0.734250`, `mrr=0.416377`
+  - seed42：`epoch=38`, `ndcg=0.483449`, `hit=0.726500`, `mrr=0.407626`
+- 初始融合搜索：
+  - baseline `model_weight=0`：`weighted_NDCG=0.4889872445345435`
+  - best `model_weight=3.0`：`weighted_NDCG=0.5142448285756511`
+  - 已生成候选包：`output/exp045_a2_feature_multiseed/prediction.zip`
+- 扩大 `model_weight` 搜索后：
+  - best `model_weight=35.0`
+  - NDCG@10：`0.5138676200451141`
+  - weighted_NDCG：`0.5161714951258527`
+  - Hit@10：`0.76075`
+  - MRR：`0.4367338293650794`
+  - 已生成更强候选包：`output/exp045_a2_feature_multiseed_w35/prediction.zip`
+
+与已有提交文件差异：
+
+- `w35` vs `w3`：`7755 / 10000` 个用户推荐串变化。
+- `w35` vs Exp-044：`9900 / 10000` 个用户推荐串变化。
+
+结论：
+
+- Exp-045 多 seed 模型融合明显强于 Exp-044 单 seed。
+- `model_weight=35.0` 比初始 `model_weight=3.0` 继续提升 `+0.001927` weighted_NDCG。
+- 如果还有提交机会，优先提交：
+  - `framework/output/exp045_a2_feature_multiseed_w35/prediction.zip`
+
+---
+
+## Tool-012：A1 多 split 稳定性审计脚本
+
+日期：2026-06-28
+
+目标：
+
+- Exp-039 在固定 split 本地最强，但线上 A1 不升反降。
+- 后续 A1 不能继续只看 `split_seed=42`，必须评估多个 split 的均值、最小值和方差。
+
+新增文件：
+
+- `framework/scripts/run_exp046_a1_multisplit_audit.sh`
+
+默认审计候选：
+
+- Exp-019/030 稳定 A1：Exp-010 Top-5 + 固定 C&S。
+- Exp-033：GAT 0.95 + GCN 0.05 + 固定 C&S。
+- Exp-039：GAT 贪心加权 + 固定 C&S。
+
+默认 split：
+
+- `42,777,2024,2026,3407`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp046_a1_multisplit_audit.sh
+```
