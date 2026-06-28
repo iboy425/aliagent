@@ -4118,3 +4118,63 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp053_a1_sign_label_feature_audit.sh
 
 - 如果 Exp-053 均值明显超过 `0.725297`，进入下一轮提交候选。
 - 如果低于 Exp-050，说明标签传播更适合作为 C&S 后处理，不适合直接拼进 MLP 输入。
+
+运行结果：
+
+| candidate | n | mean | min | max | std | 最佳后处理 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `sign_rw_k5_block_labelrw_h3_rownorm_w1` | 5 | 0.757078 | 0.742466 | 0.779909 | 0.012992 | model_only |
+| `sign_rw_k5_block_labelrw_h3_w1` | 5 | 0.753242 | 0.731507 | 0.776256 | 0.015535 | mostly model_only |
+| `sign_rw_k5_block_labelrw_h2_w1` | 5 | 0.751233 | 0.736073 | 0.773516 | 0.013893 | mostly model_only |
+| `sign_rw_k5_block_labelrw_h5_w1` | 5 | 0.749954 | 0.737900 | 0.767123 | 0.010387 | model_only |
+| `sign_rw_k5_block_labelrw_h3_w05` | 5 | 0.749772 | 0.737900 | 0.768950 | 0.010790 | mostly model_only |
+| `sign_rw_k5_block_labelsym_h3_w1` | 5 | 0.746301 | 0.729680 | 0.772603 | 0.015297 | mostly model_only |
+
+结论：
+
+- Exp-053 是继 Exp-050 后的第二次大幅提升。
+- 最强配置均值 `0.757078`，相比 Exp-050 `0.725297` 再提升约 `+0.03178`。
+- 最佳后处理是 `model_only`，说明标签传播信息已经被模型输入吸收，不应再额外强平滑。
+- 该结果已经接近当前第一名 A1 分数 `0.76845` 的区间，值得立即生成提交候选。
+
+---
+
+## Tool-021：Exp-054 A1 SIGN标签传播特征五折集成提交候选
+
+日期：2026-06-28
+
+目标：
+
+- 基于 Exp-053 最强配置生成正式候选包。
+- A2 沿用当前线上最佳 Exp-044。
+- 最终推理不额外做 C&S 平滑，使用 `smooth_weight=0`。
+
+新增文件：
+
+- `framework/scripts/build_exp054_a1_sign_label_ensemble_candidate.sh`
+  - 使用 `sign_rw_k5_block_labelrw_h3_rownorm_w1` 的 5 个 split checkpoint。
+  - 等权平均五个模型概率。
+  - 使用全部 `train_idx` 构造标签传播特征。
+  - C&S 参数中 `smooth_weight=0.0`，等价于 model-only 输出。
+  - A2 复制 `output/exp044_a2_feature_fusion/A2.csv`。
+  - 打包并校验 `prediction.zip`。
+
+本地运行命令：
+
+```bash
+cd /home/aliagent/framework
+DEVICE=cpu ./scripts/build_exp054_a1_sign_label_ensemble_candidate.sh
+```
+
+运行结果：
+
+- 候选包：`framework/output/exp054_submit_a1_sign_label_ensemble_a2_exp044/prediction.zip`
+- A1 类别分布：
+  - `{0: 64, 1: 360, 2: 257, 3: 72, 4: 1159, 5: 46, 6: 71, 7: 153, 8: 532, 9: 37}`
+- A2 沿用 Exp-044。
+- 提交格式校验通过。
+
+提交判断：
+
+- 这是当前最值得提交的候选。
+- 预期主要提升 A1；A2 应保持在 Exp-044 附近。
