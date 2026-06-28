@@ -3907,3 +3907,72 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp050_a1_sign_audit.sh
 
 - 如果某组 SIGN 的 `mean` 明显超过 `0.70`，下一步扩展为多 seed / 多配置 ensemble。
 - 如果所有 SIGN 配置仍在 `0.69` 左右，说明单纯多跳传播特征也不够，应继续尝试 APPNP/GCNII 或更激进的结构特征。
+
+运行结果：
+
+| candidate | n | mean | min | max | std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sign_rw_undir_k5_h512_l2_do04_block` | 5 | 0.725297 | 0.716895 | 0.738813 | 0.008053 |
+| `sign_sym_undir_k5_h512_l2_do04_rowblock` | 5 | 0.719817 | 0.703196 | 0.746119 | 0.014433 |
+| `sign_sym_undir_k5_h512_l2_do04_block` | 5 | 0.717260 | 0.705023 | 0.731507 | 0.008598 |
+| `sign_sym_undir_k5_h512_l2_do04_none` | 5 | 0.692237 | 0.678539 | 0.705023 | 0.009751 |
+| `sign_sym_undir_k3_h512_l2_do04_none` | 5 | 0.676164 | 0.666667 | 0.692237 | 0.008771 |
+
+结论：
+
+- Exp-050 是 A1 到目前为止最显著的无泄漏提升。
+- 最强 SIGN 配置均值 `0.725297`，相比此前 GAT 稳定均值 `0.698935` 提升约 `+0.02636`。
+- 这已经足够进入候选提交阶段。
+- 最强配置使用：
+  - 无向图；
+  - 随机游走归一化；
+  - 5跳传播；
+  - 每跳特征行归一化；
+  - MLP hidden=512, layers=2, dropout=0.4。
+
+---
+
+## Tool-018：Exp-051 A1 SIGN 五折集成提交候选
+
+日期：2026-06-28
+
+目标：
+
+- 基于 Exp-050 最强 SIGN 配置生成正式候选包。
+- A2 沿用当前线上最佳 Exp-044，只替换 A1，便于归因。
+
+新增文件：
+
+- `framework/code/a1_sign_infer.py`
+  - 读取多个 SIGN checkpoint。
+  - 按 checkpoint 内保存的参数重建传播特征和 MLP。
+  - 平均多个模型的全节点预测概率。
+  - 使用全部训练标签执行 C&S。
+  - 输出 `A1.csv`。
+- `framework/scripts/build_exp051_a1_sign_ensemble_candidate.sh`
+  - 使用 `sign_rw_undir_k5_h512_l2_do04_block` 的 5 个 split checkpoint。
+  - 等权平均五个模型概率。
+  - C&S 参数：`correct=(0.3,5,0.0)`, `smooth=(0.7,5,0.75)`。
+  - A2 复制 `output/exp044_a2_feature_fusion/A2.csv`。
+  - 打包并校验 `prediction.zip`。
+
+本地运行命令：
+
+```bash
+cd /home/aliagent/framework
+DEVICE=cpu ./scripts/build_exp051_a1_sign_ensemble_candidate.sh
+```
+
+运行结果：
+
+- 候选包：`framework/output/exp051_submit_a1_sign_ensemble_a2_exp044/prediction.zip`
+- A1 类别分布：
+  - `{0: 55, 1: 336, 2: 258, 3: 61, 4: 1288, 5: 52, 6: 46, 7: 137, 8: 481, 9: 37}`
+- A2 沿用 Exp-044。
+- 提交格式校验通过。
+
+提交判断：
+
+- 这是目前最值得提交的候选。
+- 预期主要提升 A1；A2 应接近 Exp-044 的线上 `0.50230`。
+- 风险：SIGN 五折集成的本地评估不能直接验证，因为多个 split checkpoint 对任意固定验证集都有训练重叠；但其单模型多 split 无泄漏均值已经显著强于旧 A1 路线。
