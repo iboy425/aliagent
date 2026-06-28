@@ -3594,6 +3594,62 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp045_a2_feature_multiseed.sh
 
 ---
 
+## Tool-013：A2 提交差异分析工具
+
+日期：2026-06-28
+
+背景：
+
+- Exp-045 离线显著强于 Exp-044，但线上 A2 从 `0.50230` 降到 `0.4957`。
+- 说明仅凭当前 holdout `weighted_NDCG` 会高估某些模型候选。
+- 后续 A2 候选需要先和线上最佳 Exp-044 做分布差异分析，避免过激改动。
+
+新增文件：
+
+- `framework/code/a2_compare_submissions.py`
+
+功能：
+
+- 比较两个 A2.csv：
+  - 总体推荐串变化比例。
+  - Top1 变化比例。
+  - TopK 平均重合率。
+  - 按测试历史长度桶分别统计。
+  - Top1 分布漂移。
+
+命令示例：
+
+```bash
+python3 framework/code/a2_compare_submissions.py \
+  --base_a2 framework/output/exp044_a2_feature_fusion/A2.csv \
+  --new_a2 framework/output/exp045_a2_feature_multiseed_w35/A2.csv \
+  --test_csv framework/data/rec_data/test.csv \
+  --seq_col item_seq_raw \
+  --topk 10
+```
+
+Exp045 w35 相对 Exp044 的差异：
+
+- 总体推荐串变化：`99.0000%`
+- Top1 变化：`18.3400%`
+- Top10 overlap：`89.7820%`
+- 长历史 `len>10`：
+  - changed：`99.8944%`
+  - top1_changed：`23.1257%`
+  - overlap：`85.4171%`
+- Top1 分布明显漂移：
+  - `i000481` 从 `37.79%` 降到 `30.10%`
+  - `i001069` 从 `23.74%` 升到 `27.47%`
+  - `i000909` 从 `8.31%` 升到 `10.10%`
+
+结论：
+
+- Exp045 对线上最佳 Exp044 改动过大，尤其长历史用户和 Top1 分布漂移明显。
+- 这与线上 A2 回退一致。
+- 后续 A2 候选应控制相对 Exp044 的分布漂移，而不是只追离线 weighted_NDCG。
+
+---
+
 ## Tool-012：A1 多 split 稳定性审计脚本
 
 日期：2026-06-28
