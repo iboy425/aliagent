@@ -124,16 +124,21 @@ def load_split_probs(
     data: Dict,
     sources: Dict[str, str],
     split_seed: int,
+    label_idx: np.ndarray,
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
-    """加载某个split的全部source概率"""
+    """加载某个split的全部source概率
+
+    `label_idx` 是当前 split 的训练折。SIGN 的标签传播特征只能使用
+    这些标签；如果使用全部 train_idx，会把验证标签泄漏进特征。
+    """
     probs = {}
     for name, base_dir in sources.items():
         path = os.path.join(base_dir, f"split{split_seed}", "best_model.pt")
         if not os.path.exists(path):
             raise FileNotFoundError(f"缺少checkpoint: {path}")
         print(f"  [加载] {name}: {path}")
-        probs[name] = load_sign_probs(data, path, device)
+        probs[name] = load_sign_probs(data, path, device, label_idx=label_idx)
         if device.type == "cuda":
             torch.cuda.empty_cache()
     return probs
@@ -166,7 +171,7 @@ def evaluate_split(
     labels = torch.LongTensor(data["labels"]).to(device)
     fit_idx_t = torch.LongTensor(fit_idx).to(device)
     adj = _prepare_cs_adj(data["adj"], args.cs_normalize, device)
-    probs = load_split_probs(data, sources, split_seed, device)
+    probs = load_split_probs(data, sources, split_seed, fit_idx, device)
 
     rows = []
     for weights in weight_grid:

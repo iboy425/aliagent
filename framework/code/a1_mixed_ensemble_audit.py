@@ -143,15 +143,24 @@ def candidate_weight_sets() -> List[Dict[str, float]]:
     ]
 
 
-def load_all_probs(data: Dict, paths: Dict[str, Tuple[str, str]], device: torch.device) -> Dict[str, torch.Tensor]:
-    """加载当前 split 的全部模型概率"""
+def load_all_probs(
+    data: Dict,
+    paths: Dict[str, Tuple[str, str]],
+    label_idx: np.ndarray,
+    device: torch.device,
+) -> Dict[str, torch.Tensor]:
+    """加载当前 split 的全部模型概率
+
+    SIGN模型可能包含标签传播特征。离线审计时只能使用当前 split 的训练折
+    标签构造特征，不能使用全部 train_idx。
+    """
     probs = {}
     for name, (kind, path) in paths.items():
         if not os.path.exists(path):
             raise FileNotFoundError(f"缺少checkpoint: {path}")
         print(f"  [加载] {name}: {path}")
         if kind == "sign":
-            probs[name] = load_sign_probs(data, path, device)
+            probs[name] = load_sign_probs(data, path, device, label_idx=label_idx)
         elif kind == "gnn":
             probs[name] = _average_model_probs(data, [path], device)
         else:
@@ -179,7 +188,7 @@ def evaluate_split(data: Dict, split_seed: int, args, device: torch.device) -> L
     labels = torch.LongTensor(data["labels"]).to(device)
     adj = _prepare_cs_adj(data["adj"], args.cs_normalize, device)
     fit_idx_t = torch.LongTensor(fit_idx).to(device)
-    model_probs = load_all_probs(data, checkpoint_paths(args.base_dir, split_seed), device)
+    model_probs = load_all_probs(data, checkpoint_paths(args.base_dir, split_seed), fit_idx, device)
 
     rows = []
     for weights in candidate_weight_sets():

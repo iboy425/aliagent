@@ -67,13 +67,29 @@ def _namespace_from_dict(values: Dict):
     return obj
 
 
-def load_sign_probs(data: Dict, checkpoint_path: str, device: torch.device) -> torch.Tensor:
-    """加载单个SIGN checkpoint并输出全节点概率"""
+def load_sign_probs(
+    data: Dict,
+    checkpoint_path: str,
+    device: torch.device,
+    label_idx=None,
+) -> torch.Tensor:
+    """加载单个SIGN checkpoint并输出全节点概率
+
+    Args:
+        data: A1图数据。
+        checkpoint_path: SIGN checkpoint路径。
+        device: 计算设备。
+        label_idx: 构造标签传播特征时允许使用的标签节点。
+            正式推理传空值，使用全部train_idx；离线验证必须传当前split的
+            训练折，避免验证标签泄漏进标签传播特征。
+    """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     args = _namespace_from_dict(checkpoint["args"])
     args.device = str(device)
 
-    x = build_model_features(data, args, data["train_idx"], device)
+    if label_idx is None:
+        label_idx = data["train_idx"]
+    x = build_model_features(data, args, label_idx, device)
     model = SignMLP(
         in_dim=int(checkpoint.get("input_dim", x.size(1))),
         hidden_dim=int(args.hidden_dim),

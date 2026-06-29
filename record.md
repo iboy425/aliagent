@@ -4630,3 +4630,36 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp060_a1_sign_config_ensemble_audit.sh
 
 - 如果融合均值超过 `0.765` 且 min 不低于 `0.750`，优先生成融合提交包。
 - 如果融合没有超过 `0.763653`，则用 Exp-059 当前最佳候选作为 A1 提交候选，或者转向 A2 做下一轮大提升。
+
+第一次运行结果异常：
+
+```text
+mean=0.955982  min=0.938813  undir_reverse:0.2+all_h2:0.8
+mean=0.955799  min=0.938813  undir_reverse:0.3+all_h2:0.7
+...
+```
+
+判定：
+
+- 该结果作废，不能作为提交依据。
+- 原因是离线融合审计调用了正式推理加载函数。
+- 正式推理函数默认使用全部 `train_idx` 构造标签传播特征；但离线验证时，当前 split 的验证节点也属于全局 `train_idx`。
+- 因此验证节点标签被放入标签传播特征，形成标签泄漏，导致分数虚高到 `0.95+`。
+
+修复：
+
+- `framework/code/a1_sign_infer.py`
+  - `load_sign_probs()` 新增可选 `label_idx` 参数。
+  - 正式推理不传参数，仍使用全部训练标签。
+  - 离线审计传当前 split 的训练折，避免验证标签泄漏。
+- `framework/code/a1_sign_config_ensemble_audit.py`
+  - 加载每个 split checkpoint 时传入 `fit_idx`。
+- `framework/code/a1_mixed_ensemble_audit.py`
+  - 同步修复 SIGN 离线加载逻辑，避免后续异构融合审计踩同类问题。
+
+需要重新运行：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp060_a1_sign_config_ensemble_audit.sh
+```
