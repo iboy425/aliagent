@@ -100,6 +100,21 @@ def parse_args():
     parser.add_argument("--feature_norm", type=str, default="none",
                         choices=["none", "row", "l2"],
                         help="原始节点特征归一化方式")
+    parser.add_argument("--feature_transform", type=str, default="none",
+                        choices=[
+                            "none",
+                            "standard",
+                            "svd",
+                            "raw_plus_svd",
+                            "raw_plus_standard_svd",
+                        ],
+                        help="原始节点特征变换：svd用于低秩降噪，raw_plus_*保留原始特征并追加降维特征")
+    parser.add_argument("--svd_dim", type=int, default=128,
+                        help="feature_transform包含svd时的降维维度")
+    parser.add_argument("--svd_weight", type=float, default=1.0,
+                        help="SVD降维特征整体缩放权重")
+    parser.add_argument("--svd_seed", type=int, default=42,
+                        help="TruncatedSVD随机种子")
     parser.add_argument("--block_norm", action="store_true",
                         help="对每一跳传播特征做行L2归一化，降低高阶传播尺度差异")
     parser.add_argument("--label_feature_hops", type=int, default=0,
@@ -159,13 +174,67 @@ def _row_l2_normalize_dense(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor
     return x / norm.clamp(min=eps)
 
 
+def _to_numpy_dense(features) -> np.ndarray:
+    """把特征矩阵转换为float32 dense数组"""
+    if sp.issparse(features):
+        return features.toarray().astype(np.float32)
+    if isinstance(features, torch.Tensor):
+        return features.detach().cpu().numpy().astype(np.float32)
+    return np.asarray(features, dtype=np.float32)
+
+
+def _standardize_dense(features: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """对dense特征按列标准化"""
+    mean = features.mean(axis=0, keepdims=True)
+    std = features.std(axis=0, keepdims=True)
+    return ((features - mean) / np.maximum(std, eps)).astype(np.float32)
+
+
+def _build_transformed_base_features(features, args) -> np.ndarray:
+    """构造进入SIGN传播前的基础特征
+
+    官方资料建议“PCA降维、标准化”来减少原始属性噪声。这里用
+    `TruncatedSVD` 替代传统PCA，因为原始输入是稀疏矩阵，SVD可以直接
+    处理稀疏输入，避免先转dense带来的额外开销。
+    """
+    mode = getattr(args, "feature_transform", "none")
+    if mode == "none":
+        return _to_numpy_dense(features)
+
+    raw_dense = _to_numpy_dense(features)
+    if mode == "standard":
+        return _standardize_dense(raw_dense)
+
+    if "svd" not in mode:
+        raise ValueError(f"未知特征变换方式: {mode}")
+
+    try:
+        from sklearn.decomposition import TruncatedSVD
+    except ImportError as exc:
+        raise ImportError("feature_transform使用SVD时需要安装scikit-learn") from exc
+
+    svd_dim = int(getattr(args, "svd_dim", 128))
+    max_dim = min(features.shape[0], features.shape[1]) - 1
+    svd_dim = max(1, min(svd_dim, max_dim))
+    svd = TruncatedSVD(n_components=svd_dim, random_state=int(getattr(args, "svd_seed", 42)))
+    svd_features = svd.fit_transform(features).astype(np.float32)
+    svd_features = _standardize_dense(svd_features)
+    svd_features *= float(getattr(args, "svd_weight", 1.0))
+
+    if mode == "svd":
+        return svd_features
+    if mode == "raw_plus_svd":
+        return np.concatenate([raw_dense, svd_features], axis=1).astype(np.float32)
+    if mode == "raw_plus_standard_svd":
+        return np.concatenate([_standardize_dense(raw_dense), svd_features], axis=1).astype(np.float32)
+    raise ValueError(f"未知特征变换方式: {mode}")
+
+
 def build_sign_features(data: Dict, args, device: torch.device) -> torch.Tensor:
     """预计算并拼接多跳传播特征"""
     features = preprocess_features(data["features"], method=args.feature_norm)
-    if sp.issparse(features):
-        current = torch.tensor(features.toarray(), dtype=torch.float32, device=device)
-    else:
-        current = torch.tensor(features, dtype=torch.float32, device=device)
+    current_np = _build_transformed_base_features(features, args)
+    current = torch.tensor(current_np, dtype=torch.float32, device=device)
 
     adj = _make_adj(data, args, device)
     blocks = []
@@ -383,7 +452,8 @@ def train_and_eval(args):
     print("=" * 100)
     print(
         f"hops={args.hops}, prop_norm={args.prop_norm}, graph_mode={args.graph_mode}, "
-        f"feature_norm={args.feature_norm}, block_norm={args.block_norm}"
+        f"feature_norm={args.feature_norm}, feature_transform={args.feature_transform}, "
+        f"svd_dim={args.svd_dim}, block_norm={args.block_norm}"
     )
     print(
         f"label_feature_hops={args.label_feature_hops}, "

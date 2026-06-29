@@ -4404,3 +4404,80 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp057_a1_sign_structure_feature_audit.sh
 
 - 如果 Exp-057 均值明显超过 `0.757078`，再生成结构特征提交包。
 - 如果没有超过，说明当前结构特征没有提供额外泛化收益，应转向 A2 或更强 A1 架构。
+
+运行结果：
+
+| candidate | mean | min | max | std | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| sign_label_struct_basic_w1 | 0.759087 | 0.746119 | 0.779909 | 0.011829 | 最优 |
+| sign_label_struct_label_w1 | 0.757991 | 0.741553 | 0.775342 | 0.011508 | 次优 |
+| sign_label_struct_label_w05 | 0.756712 | 0.739726 | 0.778082 | 0.013663 | 不保留 |
+| sign_label_struct_basic_w05 | 0.754155 | 0.742466 | 0.775342 | 0.012699 | 不保留 |
+
+结论：
+
+- `basic_w1` 相比 Exp-053 最优均值 `0.757078` 提升到 `0.759087`，提升 `+0.002009`。
+- 提升方向有效，说明官方建议的“节点度特征、低度节点标记”确实能补充图结构信号。
+- 但提升仍不够大，预计线上 A1 只能从 `0.7466` 提到约 `0.748` 左右，暂不单独提交。
+- 下一步继续沿官方“PCA降维、标准化”方向做更大特征工程尝试。
+
+---
+
+## Tool-025：Exp-058 A1 SIGN标签特征 + 结构特征 + SVD降噪特征审计
+
+日期：2026-06-29
+
+目标：
+
+- 在 Exp-057 最强 `sign_label_struct_basic_w1` 基础上加入低秩降噪特征。
+- 对应官方资料中的“PCA降维：767维 -> 128维减少噪声”和“特征归一化”。
+- 当前实现使用 `TruncatedSVD` 替代传统 PCA，因为原始特征是稀疏矩阵，SVD 可以直接处理稀疏输入。
+
+修改文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 新增 `--feature_transform`：
+    - `none`：保持原始逻辑。
+    - `standard`：对原始 767 维特征按列标准化。
+    - `svd`：只使用 SVD 降维特征。
+    - `raw_plus_svd`：保留原始特征，并追加 SVD 降维特征。
+    - `raw_plus_standard_svd`：标准化原始特征，并追加 SVD 降维特征。
+  - 新增 `--svd_dim`、`--svd_weight`、`--svd_seed`。
+  - 默认值保持 `feature_transform=none`，兼容旧 checkpoint。
+- `framework/scripts/run_exp058_a1_sign_svd_feature_audit.sh`
+  - 默认在 5 个 split 上审计 6 组特征变换：
+    - `standard`
+    - `svd128`
+    - `raw_plus_svd64_w05`
+    - `raw_plus_svd128_w05`
+    - `raw_plus_svd128_w1`
+    - `raw_plus_svd256_w05`
+
+原理说明：
+
+- 原始节点特征有 767 维，里面可能既有类别相关信号，也有噪声。
+- SIGN 会计算 `X, AX, A^2X, ..., A^5X`，如果原始特征里有噪声，传播会把噪声也扩散到邻居。
+- SVD/PCA 的作用是提取解释方差较大的低秩方向，相当于先把特征压缩成更稳定的“主信号”，再做图传播。
+- `raw_plus_svd` 不是直接丢掉原始特征，而是让模型同时看到原始特征和降噪特征，避免 SVD 丢失少数类别的细粒度信息。
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py`
+- `bash -n framework/scripts/run_exp058_a1_sign_svd_feature_audit.sh`
+- CPU smoke test：
+  - `feature_transform=svd`
+  - `svd_dim=32`
+  - `epochs=1`
+  - 主流程已走通。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp058_a1_sign_svd_feature_audit.sh
+```
+
+判断标准：
+
+- 若 5 split 均值达到 `0.765+`，认为是比较显著的 A1 提升，优先生成正式提交包。
+- 若只在 `0.759~0.761` 附近，说明降维特征只是小修小补，应继续切换到更强 A1 模型或 A2 冷启动方案。
