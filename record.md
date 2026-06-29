@@ -4663,3 +4663,25 @@ mean=0.955799  min=0.938813  undir_reverse:0.3+all_h2:0.7
 cd /home/aliagent/framework
 CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp060_a1_sign_config_ensemble_audit.sh
 ```
+
+修复后可信结果：
+
+| candidate | mean | min | std | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| undir:0.3 + undir_reverse:0.7 | 0.764384 | 0.748858 | 0.013259 | 最优均值 |
+| undir:0.7 + undir_reverse:0.3 | 0.763653 | 0.754338 | 0.010044 | 更稳但均值略低 |
+| undir_reverse:1 | 0.763653 | 0.747032 | 0.015187 | 单配置基线 |
+| undir:0.3 + undir_reverse:0.4 + all_h2:0.3 | 0.763653 | 0.749772 | 0.011941 | 备选 |
+
+结论：
+
+- 修复后分数回到可信范围，第一次 `0.955+` 结果确认是标签泄漏。
+- 最优融合 `undir:0.3 + undir_reverse:0.7` 比 Exp-059 单配置 `0.763653` 提升到 `0.764384`，提升 `+0.000731`。
+- 这是小幅提升，可以生成候选提交包，但不是足以追第一名的决定性突破。
+
+新增提交脚本：
+
+- `framework/scripts/build_exp060_a1_config_ensemble_candidate.sh`
+  - 5个 `undir` checkpoint 总权重 `0.3`，每个权重 `0.06`。
+  - 5个 `undir_reverse` checkpoint 总权重 `0.7`，每个权重 `0.14`。
+  - A2 沿用 Exp-044 线上最佳结果。
