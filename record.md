@@ -4811,3 +4811,39 @@ output/exp061_a1_fulltrain_config_ensemble_candidate/prediction.zip
 - 若要用一次线上提交探测 A2，优先提交 `len0`。
 - 理由：空历史用户有 `3515/10000`，是 A2 最大冷启动桶；`len0` 保持总体 overlap 接近 `97%`，风险比整体替换低得多。
 - 不建议优先提交 `len0_len1_len2_3`，因为它影响近 90% 用户，和 Exp-045 整体替换过于接近。
+
+---
+
+## Tool-030：Exp-063 A1 Exp-061 + A2 len0 联合候选
+
+日期：2026-06-29
+
+目标：
+
+- 用户指出一次提交会同时返回 A1/A2 分数，因此可以同时验证两边，不必只做单变量提交。
+- 生成一个联合候选：
+  - A1：Exp-061 全标签重训候选。
+  - A2：Exp-062 低风险 `len=0` 冷启动替换。
+
+新增文件：
+
+- `framework/scripts/build_exp063_a1_exp061_a2_len0_candidate.sh`
+
+设计：
+
+- 默认读取：
+  - A1：`output/exp061_a1_fulltrain_config_ensemble_candidate/A1.csv`
+  - A2 base：`output/exp044_a2_feature_fusion/A2.csv`
+  - A2 alt：`output/exp045_a2_feature_multiseed/A2.csv`
+- 自动生成 A2 `len=0` 桶混合结果。
+- 打包为：
+
+```text
+output/exp063_submit_a1_exp061_a2_len0/prediction.zip
+```
+
+解释：
+
+- A1 负责验证全标签重训是否能在 Exp-060 基础上继续提升。
+- A2 负责低风险探测冷启动用户是否适合 Exp-045 的模型融合推荐。
+- 因为平台会分别返回 A1/A2 分数，所以即使联合提交，也能判断哪一侧有效。
