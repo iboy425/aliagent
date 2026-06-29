@@ -4685,3 +4685,106 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp060_a1_sign_config_ensemble_audit.sh
   - 5个 `undir` checkpoint 总权重 `0.3`，每个权重 `0.06`。
   - 5个 `undir_reverse` checkpoint 总权重 `0.7`，每个权重 `0.14`。
   - A2 沿用 Exp-044 线上最佳结果。
+
+线上结果：
+
+- 提交时间：2026-06-29 16:28:03
+- 总分：`0.6286`
+- A1：`0.7550`
+- A2：`0.5023`
+
+结论：
+
+- A1 从 Exp-055 的 `0.7466` 提升到 `0.7550`，Exp-060 方向线上有效。
+- A2 沿用 Exp-044，保持 `0.5023`。
+- 距离第一名仍有两块差距：
+  - A1：`0.7550 -> 0.76845`
+  - A2：`0.5023 -> 0.50967`
+
+---
+
+## Tool-028：Exp-061 A1 Exp-060有效配置全标签重训候选
+
+日期：2026-06-29
+
+目标：
+
+- 基于已被线上验证有效的 Exp-060 配置，做一次更大幅度的 A1 尝试。
+- 当前 Exp-060 提交用的是 5 折 split checkpoint，每个模型训练时只看过约 90% 训练标签。
+- Exp-061 使用全部 `train_idx` 标签重训模型，让模型参数本身也利用全部监督信号。
+
+新增文件：
+
+- `framework/scripts/run_exp061_a1_fulltrain_config_ensemble_candidate.sh`
+
+设计：
+
+- 训练两套全标签模型：
+  - `undir`：标签传播方向 `undirected`，总权重 `0.3`。
+  - `undir_reverse`：标签传播方向 `undirected,reverse`，总权重 `0.7`。
+- 每套训练 5 个 seed：`42,777,2024,2026,3407`。
+- 每个模型的固定训练 epoch 从 Exp-059 对应 split checkpoint 的 `best_epoch` 读取。
+- 训练完成后按 Exp-060 最优融合权重生成 A1。
+- A2 继续沿用 Exp-044，便于归因。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp061_a1_fulltrain_config_ensemble_candidate.sh
+```
+
+候选提交包：
+
+```text
+output/exp061_a1_fulltrain_config_ensemble_candidate/prediction.zip
+```
+
+风险：
+
+- 全标签重训没有真实验证集，离线指标不能直接证明线上提升。
+- 但 Exp-060 已证明该特征配置线上有效，且过去 Exp-055 全标签重训带来过小幅线上增益，因此值得作为 A1 下一次候选。
+
+---
+
+## Tool-029：Exp-062 A2冷启动/短历史桶受控替换候选
+
+日期：2026-06-29
+
+目标：
+
+- 当前 A2 最强线上版本是 Exp-044：`0.5023`。
+- Exp-045 多 seed 模型离线更强，但整体线上降到 `0.4957`。
+- 因此不能整体替换 A2，需要只对冷启动/短历史用户做受控替换，降低分布漂移风险。
+
+新增文件：
+
+- `framework/code/a2_bucket_blend.py`
+  - 输入 base A2、alt A2、test.csv。
+  - 按历史长度桶选择哪些用户使用 alt 推荐。
+  - 输出混合后的 A2.csv，并打印变化率。
+- `framework/scripts/run_exp062_a2_bucket_blend_candidates.sh`
+  - base：`output/exp044_a2_feature_fusion/A2.csv`
+  - alt：`output/exp045_a2_feature_multiseed/A2.csv`
+  - 生成 5 个候选：
+    - `len0`
+    - `len1`
+    - `len2_3`
+    - `len0_len1`
+    - `len0_len1_len2_3`
+
+本地生成结果：
+
+| 候选 | 替换桶 | 总体changed | top1_changed | Top10 overlap | 风险 |
+| --- | --- | ---: | ---: | ---: | --- |
+| len0 | len=0 | 34.47% | 4.85% | 96.98% | 低 |
+| len1 | len=1 | 9.81% | 0.72% | 99.09% | 低但影响小 |
+| len2_3 | len=2-3 | 43.65% | 4.87% | 96.29% | 中 |
+| len0_len1 | len=0,len=1 | 44.28% | 5.57% | 96.07% | 中 |
+| len0_len1_len2_3 | len=0,len=1,len=2-3 | 87.93% | 10.44% | 92.36% | 高 |
+
+建议：
+
+- 若要用一次线上提交探测 A2，优先提交 `len0`。
+- 理由：空历史用户有 `3515/10000`，是 A2 最大冷启动桶；`len0` 保持总体 overlap 接近 `97%`，风险比整体替换低得多。
+- 不建议优先提交 `len0_len1_len2_3`，因为它影响近 90% 用户，和 Exp-045 整体替换过于接近。
