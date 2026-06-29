@@ -4934,3 +4934,79 @@ output/exp065_submit_a1_fulltrain_split_blend_a2_len0_len1/prediction.zip
 
 - 如果提交次数充足，优先提交 Exp-065，因为它真正同步改变 A1/A2。
 - 如果希望更保守，则提交 Exp-064，它只扩展 A2，A1 保持 Exp-061。
+
+---
+
+## Tool-033：参数化 A1/A2 联合候选生成器
+
+日期：2026-06-29
+
+目标：
+
+- 用户明确要求后续 A1、A2 同步推进，避免一次提交只验证单边变化。
+- 把 Exp-065 中写死的 A1 checkpoint 权重和 A2 替换桶抽成参数，方便根据线上反馈快速生成下一版联合候选。
+
+新增文件：
+
+- `framework/scripts/build_joint_a1_sign_a2_bucket_candidate.sh`
+- `framework/scripts/build_exp066_a1_blend90_a2_len0_len1_candidate.sh`
+- `framework/scripts/build_exp067_a1_blend90_a2_len0_len1_len2_3_candidate.sh`
+
+通用生成器参数：
+
+- `FULLTRAIN_WEIGHT`：A1 中 Exp-061 全标签模型总权重，默认 `0.85`。
+- `UNDER_WEIGHT`：A1 中 `undir` 配置内部权重，默认 `0.30`。
+- `REVERSE_WEIGHT`：A1 中 `undir_reverse` 配置内部权重，默认 `0.70`。
+- `A2_BUCKETS`：A2 使用备用结果的历史长度桶，默认 `len=0,len=1`。
+- `OUT_DIR`：候选包输出目录。
+
+当前预置候选：
+
+- Exp-066：
+  - A1：`FULLTRAIN_WEIGHT=0.90`，比 Exp-065 更偏向线上有效的全标签重训模型。
+  - A2：`A2_BUCKETS=len=0,len=1`。
+  - 输出：`output/exp066_submit_a1_blend90_a2_len0_len1/prediction.zip`
+- Exp-067：
+  - A1：`FULLTRAIN_WEIGHT=0.90`。
+  - A2：`A2_BUCKETS=len=0,len=1,len=2-3`。
+  - 输出：`output/exp067_submit_a1_blend90_a2_len0_len1_len2_3/prediction.zip`
+
+原理解释：
+
+- A1 现在最强的方向不是传统 GCN/GAT，而是 SIGN 特征工程模型：
+  - 原始节点特征经过多跳图传播，变成多尺度邻域特征；
+  - 训练标签也经过图传播，变成“周围已知标签分布”特征；
+  - `undir_reverse` 在线上有效，说明反向边方向能补充产品图中的信息流。
+- Exp-061 是全标签重训，线上从 A1 `0.7550` 提到 `0.7590`，证明正式训练时使用全部训练标签是有效的。
+- Exp-065 往全标签模型里混入 15% 分折模型，是为了稳健；但如果分折模型拖慢全标签模型，可以把全标签权重从 `0.85` 提到 `0.90`。
+- A2 当前线上证明 `len=0` 冷启动桶替换有效，从 `0.5023` 提到 `0.5033`；下一步应验证 `len=1`，再谨慎扩到 `len=2-3`。
+
+校验：
+
+```bash
+bash -n framework/scripts/build_joint_a1_sign_a2_bucket_candidate.sh
+bash -n framework/scripts/build_exp066_a1_blend90_a2_len0_len1_candidate.sh
+bash -n framework/scripts/build_exp067_a1_blend90_a2_len0_len1_len2_3_candidate.sh
+```
+
+结果：语法检查通过。
+
+运行校验：
+
+```bash
+cd /home/aliagent/framework
+DEVICE=cpu ./scripts/build_exp066_a1_blend90_a2_len0_len1_candidate.sh
+```
+
+Exp-066 生成结果：
+
+- 候选包：`output/exp066_submit_a1_blend90_a2_len0_len1/prediction.zip`
+- A1 类别分布：
+  - `{0: 78, 1: 385, 2: 283, 3: 71, 4: 1216, 5: 47, 6: 79, 7: 145, 8: 409, 9: 38}`
+- A2 桶替换统计：
+  - 总体 `changed=44.2800%`
+  - 总体 `top1_changed=5.5700%`
+  - 总体 `overlap=96.0680%`
+  - `len=0` 替换用户数 `3515`
+  - `len=1` 替换用户数 `1003`
+- 提交格式：校验通过。
