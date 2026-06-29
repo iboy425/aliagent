@@ -113,6 +113,11 @@ def parse_args():
                         help="是否对每一跳标签传播特征做行归一化")
     parser.add_argument("--label_feature_weight", type=float, default=1.0,
                         help="标签传播特征整体缩放权重")
+    parser.add_argument("--structure_feature_mode", type=str, default="none",
+                        choices=["none", "basic", "label"],
+                        help="结构特征模式：basic=度数/低度标记，label=额外加入训练邻居标签统计")
+    parser.add_argument("--structure_feature_weight", type=float, default=1.0,
+                        help="结构特征整体缩放权重")
 
     parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--num_layers", type=int, default=2)
@@ -214,6 +219,72 @@ def build_label_features(
     return torch.cat(blocks, dim=1) * float(getattr(args, "label_feature_weight", 1.0))
 
 
+def _standardize_columns(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """对结构特征按列标准化"""
+    mean = values.mean(axis=0, keepdims=True)
+    std = values.std(axis=0, keepdims=True)
+    return (values - mean) / np.maximum(std, eps)
+
+
+def build_structure_features(
+    data: Dict,
+    args,
+    label_idx: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """构造图结构特征
+
+    `basic` 只使用图结构，不使用标签。
+    `label` 在 basic 基础上加入当前训练标签邻居统计；验证节点标签不会进入统计。
+    """
+    mode = getattr(args, "structure_feature_mode", "none")
+    if mode == "none":
+        return None
+
+    adj = data["adj"].tocsr().astype(np.float32)
+    undir = ((adj + adj.T) > 0).astype(np.float32).tocsr()
+    in_degree = np.asarray(adj.sum(axis=0)).reshape(-1).astype(np.float32)
+    out_degree = np.asarray(adj.sum(axis=1)).reshape(-1).astype(np.float32)
+    degree = np.asarray(undir.sum(axis=1)).reshape(-1).astype(np.float32)
+    n = degree.shape[0]
+
+    basic = np.column_stack([
+        np.log1p(in_degree),
+        np.log1p(out_degree),
+        np.log1p(degree),
+        np.sqrt(degree),
+        (degree == 0).astype(np.float32),
+        (degree <= 1).astype(np.float32),
+        (degree <= 2).astype(np.float32),
+        (degree <= 5).astype(np.float32),
+        (in_degree == 0).astype(np.float32),
+        (out_degree == 0).astype(np.float32),
+    ]).astype(np.float32)
+    blocks = [_standardize_columns(basic)]
+
+    if mode == "label":
+        num_classes = data["num_classes"]
+        label_seed = np.zeros((n, num_classes), dtype=np.float32)
+        labels_np = data["labels"]
+        label_seed[label_idx, labels_np[label_idx]] = 1.0
+        neigh_label_counts = undir.dot(label_seed).astype(np.float32)
+        labeled_neigh = neigh_label_counts.sum(axis=1, keepdims=True)
+        degree_den = np.maximum(degree.reshape(-1, 1), 1.0)
+        neigh_label_ratio = labeled_neigh / degree_den
+        neigh_label_dist = neigh_label_counts / np.maximum(labeled_neigh, 1.0)
+        label_stats = np.concatenate([
+            np.log1p(labeled_neigh),
+            neigh_label_ratio,
+            neigh_label_dist,
+        ], axis=1).astype(np.float32)
+        blocks.append(_standardize_columns(label_stats[:, :2]))
+        blocks.append(neigh_label_dist)
+
+    features = np.concatenate(blocks, axis=1).astype(np.float32)
+    features *= float(getattr(args, "structure_feature_weight", 1.0))
+    return torch.tensor(features, dtype=torch.float32, device=device)
+
+
 def build_model_features(
     data: Dict,
     args,
@@ -225,6 +296,9 @@ def build_model_features(
     label_features = build_label_features(data, args, label_idx, device)
     if label_features is not None:
         x = torch.cat([x, label_features], dim=1)
+    structure_features = build_structure_features(data, args, label_idx, device)
+    if structure_features is not None:
+        x = torch.cat([x, structure_features], dim=1)
     return x
 
 

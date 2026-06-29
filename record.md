@@ -4333,3 +4333,74 @@ GPU运行结果：
   - `pseudo_weight=0.5`
   - `epochs=2`
   - split42 选出 `272` 个伪标签，主流程已走通。
+
+运行结果：
+
+| threshold | pseudo_weight | avg_pseudo | mean | min | std | kind |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0.6 | 1.0 | 1496.8 | 0.757260 | 0.740639 | 0.013673 | model_only |
+| 0.75 | 1.0 | 671.0 | 0.755434 | 0.744292 | 0.011644 | model_only |
+| 0.7 | 0.5 | 911.2 | 0.753425 | 0.741553 | 0.010728 | model_only |
+| 0.6 | 0.5 | 1496.8 | 0.752694 | 0.737900 | 0.015308 | model_only |
+| 0.7 | 1.0 | 911.2 | 0.752146 | 0.736986 | 0.011661 | model_only |
+| 0.75 | 0.5 | 671.0 | 0.750868 | 0.737900 | 0.011786 | model_only |
+
+结论：
+
+- 伪标签自训练最高 `0.757260`，只比 Exp-053 的 `0.757078` 高 `+0.000182`。
+- 这不是显著提升，不生成提交包。
+- 继续自训练大概率只是小幅波动，应切换到官方提到的结构特征工程。
+
+---
+
+## Tool-024：Exp-057 A1 SIGN标签特征 + 图结构特征审计
+
+日期：2026-06-29
+
+目标：
+
+- 根据官方提分材料中的“节点度特征拼接、低度节点额外标记”做结构特征工程。
+- 在 Exp-053 最强 SIGN-label 配置基础上追加结构特征。
+
+修改文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 新增 `--structure_feature_mode {none,basic,label}`。
+  - 新增 `--structure_feature_weight`。
+  - `basic` 特征：
+    - 入度、出度、无向度；
+    - `log1p` 度数；
+    - 低度/孤立标记。
+  - `label` 特征：
+    - 在 `basic` 基础上加入当前训练标签邻居类别分布；
+    - 每个 split 只用训练折标签统计，不使用验证标签。
+- `framework/scripts/run_exp057_a1_sign_structure_feature_audit.sh`
+  - 默认审计 4 组配置：
+    - `basic_w1`
+    - `basic_w05`
+    - `label_w1`
+    - `label_w05`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp057_a1_sign_structure_feature_audit.sh
+```
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py`
+- `bash -n framework/scripts/run_exp057_a1_sign_structure_feature_audit.sh`
+- CPU smoke test：
+  - `structure_feature_mode=label`
+  - `epochs=1`
+  - 主流程已走通。
+- 旧 Exp054 checkpoint 兼容性验证：
+  - 重新运行 `build_exp054_a1_sign_label_ensemble_candidate.sh`。
+  - A1 类别分布保持不变。
+
+判断标准：
+
+- 如果 Exp-057 均值明显超过 `0.757078`，再生成结构特征提交包。
+- 如果没有超过，说明当前结构特征没有提供额外泛化收益，应转向 A2 或更强 A1 架构。
