@@ -4745,6 +4745,29 @@ output/exp061_a1_fulltrain_config_ensemble_candidate/prediction.zip
 - 全标签重训没有真实验证集，离线指标不能直接证明线上提升。
 - 但 Exp-060 已证明该特征配置线上有效，且过去 Exp-055 全标签重训带来过小幅线上增益，因此值得作为 A1 下一次候选。
 
+生成结果：
+
+- A1 输出：`output/exp061_a1_fulltrain_config_ensemble_candidate/A1.csv`
+- 提交包：`output/exp061_a1_fulltrain_config_ensemble_candidate/prediction.zip`
+- 提交格式校验：通过
+- A1 类别分布：
+  - 类别 0：78
+  - 类别 1：383
+  - 类别 2：283
+  - 类别 3：70
+  - 类别 4：1215
+  - 类别 5：47
+  - 类别 6：82
+  - 类别 7：146
+  - 类别 8：409
+  - 类别 9：38
+
+阶段结论：
+
+- Exp-061 与 Exp-060 的类别分布接近，没有出现明显类别坍缩。
+- A2 仍沿用 Exp-044，因此如果提交该包，线上变化主要归因于 A1。
+- 建议作为下一次 A1 单变量验证提交。
+
 ---
 
 ## Tool-029：Exp-062 A2冷启动/短历史桶受控替换候选
