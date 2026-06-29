@@ -84,6 +84,10 @@ def parse_args():
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--stratified_split", action="store_true")
+    parser.add_argument("--train_all_labels", action="store_true",
+                        help="最终训练模式：使用全部train_idx标签训练，不保留验证集")
+    parser.add_argument("--disable_early_stop", action="store_true",
+                        help="关闭早停，完整训练到--epochs；适合最终固定epoch重训")
 
     parser.add_argument("--hops", type=int, default=3,
                         help="SIGN传播跳数K，最终拼接K+1组特征")
@@ -226,6 +230,8 @@ def build_model_features(
 
 def split_indices(data: Dict, args) -> Tuple[np.ndarray, np.ndarray]:
     """划分训练/验证节点"""
+    if getattr(args, "train_all_labels", False):
+        return data["train_idx"], data["train_idx"]
     if args.stratified_split:
         return stratified_split(data["labels"], data["train_idx"], args.val_ratio, args.split_seed)
     return split_train_val(data["train_idx"], args.val_ratio, args.split_seed)
@@ -296,6 +302,7 @@ def train_and_eval(args):
     device = get_device(args.device)
     data = GraphDataset.load(args.data_path)
     train_idx, val_idx = split_indices(data, args)
+    validation_disabled = bool(getattr(args, "train_all_labels", False))
 
     print("=" * 100)
     print("A1 SIGN/MLP")
@@ -312,6 +319,8 @@ def train_and_eval(args):
         f"label_feature_weight={args.label_feature_weight}"
     )
     print(f"train={len(train_idx)}, val={len(val_idx)}, split_seed={args.split_seed}, seed={args.seed}")
+    if validation_disabled:
+        print("启用最终全标签训练：验证指标仅作训练监控，不作为泛化指标")
 
     labels = torch.LongTensor(data["labels"]).to(device)
     x = build_model_features(data, args, train_idx, device)
@@ -347,7 +356,7 @@ def train_and_eval(args):
         with torch.no_grad():
             logits = model(x)
             train_acc = compute_accuracy(logits[train_idx_t], labels[train_idx_t])
-            val_acc = compute_accuracy(logits[val_idx_t], labels[val_idx_t])
+            val_acc = train_acc if validation_disabled else compute_accuracy(logits[val_idx_t], labels[val_idx_t])
         history.append({
             "epoch": epoch,
             "train_loss": float(loss.item()),
@@ -367,7 +376,7 @@ def train_and_eval(args):
             wait = 0
         else:
             wait += 1
-        if wait >= args.patience:
+        if (not args.disable_early_stop) and wait >= args.patience:
             print(f"早停触发: best_acc={best_acc:.6f}, best_epoch={best_epoch}")
             break
 

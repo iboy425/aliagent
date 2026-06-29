@@ -4178,3 +4178,76 @@ DEVICE=cpu ./scripts/build_exp054_a1_sign_label_ensemble_candidate.sh
 
 - 这是当前最值得提交的候选。
 - 预期主要提升 A1；A2 应保持在 Exp-044 附近。
+
+线上结果：
+
+- 提交时间：`2026-06-28 19:24:04`
+- 总分：`0.6241`
+- A1 分类分数：`0.7459`
+- A2 推荐分数：`0.5023`
+
+复盘：
+
+- Exp-054 继续显著提升，总分从 Exp-051 的 `0.6070` 提升到 `0.6241`。
+- A1 从 `0.7117` 提升到 `0.7459`，证明标签传播特征在线上有效。
+- 与当前第一名 A1 `0.76845` 仍有约 `0.02255` 差距。
+- Exp-054 使用的是 split checkpoint，每个模型训练时只见过约 90% 标签；正式推理虽然使用了全部标签构造标签传播特征，但模型权重本身仍不是全标签训练得到的。
+- 下一步尝试“全标签最终训练”：用全部 `train_idx` 训练 SIGN 标签特征模型，并用多个 seed/epoch 集成。
+
+---
+
+## Tool-022：Exp-055 A1 SIGN标签传播特征全标签最终训练候选
+
+日期：2026-06-29
+
+目标：
+
+- 用全部训练标签重训 Exp-053 最强模型结构。
+- 进一步缩小 A1 与第一名的差距。
+
+修改文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 新增 `--train_all_labels`。
+  - 新增 `--disable_early_stop`。
+  - 全标签模式下，全部 `train_idx` 参与损失和标签传播特征构造，验证指标仅作训练监控。
+- `framework/scripts/run_exp055_a1_sign_label_fulltrain_candidate.sh`
+  - 使用 Exp-053 最强结构：
+    - `hops=5`
+    - `prop_norm=random_walk`
+    - `graph_mode=undirected`
+    - `block_norm=True`
+    - `label_feature_hops=3`
+    - `label_feature_norm=random_walk`
+    - `label_feature_row_norm=True`
+  - 训练 5 个全标签模型：
+    - `seed42_e34`
+    - `seed777_e34`
+    - `seed3407_e36`
+    - `seed2026_e40`
+    - `seed2024_e45`
+  - epoch 选择来自 Exp-053 最强配置各 split 的最优 epoch：`34,34,36,40,45`。
+  - 五模型等权集成。
+  - A2 沿用 Exp-044。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp055_a1_sign_label_fulltrain_candidate.sh
+```
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py framework/code/validate_submission.py`
+- `bash -n framework/scripts/run_exp055_a1_sign_label_fulltrain_candidate.sh`
+- CPU smoke test：
+  - `--train_all_labels`
+  - `--disable_early_stop`
+  - `epochs=1`
+  - 主流程已走通。
+
+提交判断：
+
+- Exp-055 生成后需要先查看 A1 类别分布。
+- 如果分布没有明显异常，可以作为下一次候选提交。
