@@ -4481,3 +4481,84 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp058_a1_sign_svd_feature_audit.sh
 
 - 若 5 split 均值达到 `0.765+`，认为是比较显著的 A1 提升，优先生成正式提交包。
 - 若只在 `0.759~0.761` 附近，说明降维特征只是小修小补，应继续切换到更强 A1 模型或 A2 冷启动方案。
+
+运行结果：
+
+| candidate | mean | min | max | std | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| sign_label_struct_basic_standard | 0.759635 | 0.749772 | 0.778082 | 0.009706 | 最优 |
+| sign_label_struct_basic_raw_svd128_w1 | 0.757260 | 0.747945 | 0.775342 | 0.009585 | 不保留 |
+| sign_label_struct_basic_raw_svd128_w05 | 0.756895 | 0.744292 | 0.777169 | 0.011500 | 不保留 |
+| sign_label_struct_basic_raw_svd64_w05 | 0.755068 | 0.742466 | 0.778995 | 0.013151 | 不保留 |
+| sign_label_struct_basic_raw_svd256_w05 | 0.754521 | 0.740639 | 0.773516 | 0.010641 | 不保留 |
+| sign_label_struct_basic_svd128_w1 | 0.749954 | 0.741553 | 0.765297 | 0.008633 | 不保留 |
+
+结论：
+
+- `standard` 比 Exp-057 最优 `0.759087` 小幅提升到 `0.759635`，提升 `+0.000548`。
+- SVD 降维没有带来更大收益，甚至纯 SVD 明显下降，说明当前类别信号可能分布在原始稀疏特征的细粒度维度中，低秩压缩会丢信息。
+- 暂不提交，继续沿真正带来大幅提升的“标签传播特征”方向扩展。
+
+---
+
+## Tool-026：Exp-059 A1 SIGN多方向标签传播特征审计
+
+日期：2026-06-29
+
+目标：
+
+- 在 Exp-058 最优 `standard + structure basic + labelrw_h3` 基础上，扩展标签传播特征的图方向。
+- 检查有向边是否包含额外分类信息。
+
+修改文件：
+
+- `framework/code/a1_sign_mlp.py`
+  - 新增 `--label_feature_graph_modes`，支持逗号分隔：
+    - `undirected`：无向邻居标签分布；
+    - `directed`：原始边方向传播；
+    - `reverse`：反向边传播。
+  - 新增 `--label_feature_norms`，支持同时拼接 `random_walk` 和 `symmetric` 两种归一化标签传播特征。
+  - `_make_adj()` 支持按调用方传入图方向，兼容旧 checkpoint。
+- `framework/scripts/run_exp059_a1_sign_directed_label_feature_audit.sh`
+  - 默认固定 Exp-058 最优特征侧配置：
+    - `feature_transform=standard`
+    - `structure_feature_mode=basic`
+    - `hops=5`
+    - `label_feature_hops=2/3/4`
+  - 审计方向组合：
+    - 单方向：`undirected`、`directed`、`reverse`
+    - 双方向：`undirected,directed`、`undirected,reverse`、`directed,reverse`
+    - 三方向：`undirected,directed,reverse`
+    - 三方向 + 双归一化：`random_walk,symmetric`
+
+原理说明：
+
+- 之前的标签传播默认把图无向化，等价于只问“邻居整体上是什么类别”。
+- 如果边方向有业务意义，那么“我指向谁”和“谁指向我”可能代表不同关系。
+- 多方向标签传播让模型同时看到三类信号：
+  - 无向邻居类别共性；
+  - 出边邻居类别；
+  - 入边邻居类别。
+- 如果 A1 图确实是有向金融产品关系，这一轮可能比 SVD、度数特征带来更大的提升。
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py`
+- `bash -n framework/scripts/run_exp059_a1_sign_directed_label_feature_audit.sh`
+- CPU smoke test：
+  - `label_feature_graph_modes=undirected,directed,reverse`
+  - `label_feature_norms=random_walk,symmetric`
+  - `epochs=1`
+  - 主流程已走通。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp059_a1_sign_directed_label_feature_audit.sh
+```
+
+判断标准：
+
+- 若均值达到 `0.765+`，生成 A1 正式候选包。
+- 若均值仍停在 `0.760` 左右，说明边方向贡献有限，下一步转向更强的 A2 冷启动/负采样方案或 A1 多模型蒸馏。

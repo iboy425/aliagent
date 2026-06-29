@@ -122,6 +122,10 @@ def parse_args():
     parser.add_argument("--label_feature_norm", type=str, default="random_walk",
                         choices=["symmetric", "random_walk"],
                         help="标签传播特征使用的邻接矩阵归一化方式")
+    parser.add_argument("--label_feature_graph_modes", type=str, default="",
+                        help="标签传播使用的图方向，逗号分隔；空值表示沿用--graph_mode，可选undirected/directed/reverse")
+    parser.add_argument("--label_feature_norms", type=str, default="",
+                        help="标签传播归一化方式，逗号分隔；空值表示沿用--label_feature_norm")
     parser.add_argument("--label_feature_include_seed", action="store_true",
                         help="是否把原始标签one-hot种子Y0拼入特征；默认只拼1..H跳传播结果")
     parser.add_argument("--label_feature_row_norm", action="store_true",
@@ -157,11 +161,30 @@ def _parse_float_list(value: str) -> List[float]:
     return [float(item.strip()) for item in value.split(",") if item.strip()]
 
 
-def _make_adj(data: Dict, args, device: torch.device, norm_type: str = None) -> torch.Tensor:
+def _parse_str_list(value: str) -> List[str]:
+    """解析逗号分隔字符串列表"""
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _make_adj(
+    data: Dict,
+    args,
+    device: torch.device,
+    norm_type: str = None,
+    graph_mode: str = None,
+) -> torch.Tensor:
     """构造传播矩阵"""
-    adj = data["adj"]
-    if args.graph_mode == "undirected":
+    adj = data["adj"].tocsr().astype(np.float32)
+    graph_mode = getattr(args, "graph_mode", "undirected") if graph_mode is None else graph_mode
+    graph_mode = str(graph_mode).lower()
+    if graph_mode == "undirected":
         adj = ((adj + adj.T) > 0).astype(np.float32).tocsr()
+    elif graph_mode in {"directed", "forward"}:
+        adj = adj.tocsr()
+    elif graph_mode in {"reverse", "backward"}:
+        adj = adj.T.tocsr()
+    else:
+        raise ValueError(f"未知图方向模式: {graph_mode}")
     norm_type = args.prop_norm if norm_type is None else norm_type
     if norm_type == "symmetric":
         return normalize_adj_sparse(adj, device=device)
@@ -271,18 +294,27 @@ def build_label_features(
     label_values = torch.LongTensor(labels_np[label_idx]).to(device)
     seed[label_idx_t] = F.one_hot(label_values, num_classes=num_classes).float()
 
-    label_feature_norm = getattr(args, "label_feature_norm", "random_walk")
-    adj = _make_adj(data, args, device, norm_type=label_feature_norm)
-    current = seed
     blocks = []
     if bool(getattr(args, "label_feature_include_seed", False)):
         blocks.append(seed)
-    for _ in range(label_feature_hops):
-        current = torch.sparse.mm(adj, current)
-        block = current
-        if bool(getattr(args, "label_feature_row_norm", False)):
-            block = normalize_score_rows(block)
-        blocks.append(block)
+
+    graph_modes = _parse_str_list(getattr(args, "label_feature_graph_modes", ""))
+    if not graph_modes:
+        graph_modes = [getattr(args, "graph_mode", "undirected")]
+    norm_types = _parse_str_list(getattr(args, "label_feature_norms", ""))
+    if not norm_types:
+        norm_types = [getattr(args, "label_feature_norm", "random_walk")]
+
+    for graph_mode in graph_modes:
+        for label_feature_norm in norm_types:
+            current = seed
+            adj = _make_adj(data, args, device, norm_type=label_feature_norm, graph_mode=graph_mode)
+            for _ in range(label_feature_hops):
+                current = torch.sparse.mm(adj, current)
+                block = current
+                if bool(getattr(args, "label_feature_row_norm", False)):
+                    block = normalize_score_rows(block)
+                blocks.append(block)
     if not blocks:
         return None
     return torch.cat(blocks, dim=1) * float(getattr(args, "label_feature_weight", 1.0))
@@ -458,6 +490,8 @@ def train_and_eval(args):
     print(
         f"label_feature_hops={args.label_feature_hops}, "
         f"label_feature_norm={args.label_feature_norm}, "
+        f"label_feature_graph_modes={args.label_feature_graph_modes}, "
+        f"label_feature_norms={args.label_feature_norms}, "
         f"label_feature_include_seed={args.label_feature_include_seed}, "
         f"label_feature_row_norm={args.label_feature_row_norm}, "
         f"label_feature_weight={args.label_feature_weight}"
