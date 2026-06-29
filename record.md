@@ -4562,3 +4562,71 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp059_a1_sign_directed_label_feature_audit
 
 - 若均值达到 `0.765+`，生成 A1 正式候选包。
 - 若均值仍停在 `0.760` 左右，说明边方向贡献有限，下一步转向更强的 A2 冷启动/负采样方案或 A1 多模型蒸馏。
+
+运行结果：
+
+| candidate | mean | min | max | std | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| standard_struct_label_undir_reverse_h3_rw | 0.763653 | 0.747032 | 0.789954 | 0.015187 | 最优但波动较大 |
+| standard_struct_label_undir_h3_rw | 0.759817 | 0.750685 | 0.778995 | 0.009920 | 更稳定 |
+| standard_struct_label_all_h2_rw | 0.759087 | 0.748858 | 0.780822 | 0.011339 | 可作为融合候选 |
+| standard_struct_label_directed_reverse_h3_rw | 0.755616 | 0.744292 | 0.777169 | 0.011985 | 不保留 |
+| standard_struct_label_undir_directed_h3_rw | 0.754703 | 0.746119 | 0.775342 | 0.010907 | 不保留 |
+| standard_struct_label_all_h4_rw | 0.753973 | 0.743379 | 0.773516 | 0.011089 | 不保留 |
+| standard_struct_label_all_h3_rw | 0.753973 | 0.736073 | 0.778082 | 0.013833 | 不保留 |
+| standard_struct_label_all_h3_rw_sym | 0.739726 | 0.732420 | 0.753425 | 0.007684 | 不保留 |
+| standard_struct_label_reverse_h3_rw | 0.726393 | 0.717808 | 0.743379 | 0.008978 | 不保留 |
+| standard_struct_label_directed_h3_rw | 0.724201 | 0.710502 | 0.738813 | 0.009277 | 不保留 |
+
+关键观察：
+
+- `undirected+reverse` 比 Exp-058 最优 `0.759635` 提升到 `0.763653`，提升 `+0.004018`。
+- 单独 `reverse` 很差，但 `undirected+reverse` 最好，说明反向边标签不能单独用，但能补充无向邻居标签。
+- `undirected+reverse` 在 `split42/777/3407` 明显赢，在 `split2024/2026` 输给纯 `undirected`。
+- 因此下一步不急着提交单一 `undirected+reverse`，先做配置级概率融合，争取获得更稳的候选。
+
+---
+
+## Tool-027：Exp-060 A1 SIGN配置概率融合审计
+
+日期：2026-06-29
+
+目标：
+
+- 不重新训练，直接融合 Exp-059 已有 checkpoint 的输出概率。
+- 解决 `undirected+reverse` 上限高但分折波动大的问题。
+- 检查 `undirected`、`undirected+reverse`、`all_h2` 三类配置是否互补。
+
+新增文件：
+
+- `framework/code/a1_sign_config_ensemble_audit.py`
+  - 支持 `name=path` 形式传入多个 SIGN 配置目录。
+  - 每个 split 只加载对应 split 的 checkpoint。
+  - 用 0.1 粒度 simplex 权重网格融合概率。
+  - 输出跨 split 的 mean/min/std 汇总。
+- `framework/scripts/run_exp060_a1_sign_config_ensemble_audit.sh`
+  - 默认融合：
+    - `undir=standard_struct_label_undir_h3_rw`
+    - `undir_reverse=standard_struct_label_undir_reverse_h3_rw`
+    - `all_h2=standard_struct_label_all_h2_rw`
+- `framework/scripts/build_exp059_a1_undir_reverse_candidate.sh`
+  - 备用：直接用 Exp-059 当前最强 `undirected+reverse` 生成候选提交包。
+  - 是否提交取决于 Exp-060 是否能找到更稳组合。
+
+已完成检查：
+
+- `python3 -m py_compile framework/code/a1_sign_config_ensemble_audit.py framework/code/a1_sign_mlp.py framework/code/a1_sign_infer.py`
+- `bash -n framework/scripts/run_exp060_a1_sign_config_ensemble_audit.sh`
+- `bash -n framework/scripts/build_exp059_a1_undir_reverse_candidate.sh`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 ./scripts/run_exp060_a1_sign_config_ensemble_audit.sh
+```
+
+判断标准：
+
+- 如果融合均值超过 `0.765` 且 min 不低于 `0.750`，优先生成融合提交包。
+- 如果融合没有超过 `0.763653`，则用 Exp-059 当前最佳候选作为 A1 提交候选，或者转向 A2 做下一轮大提升。
