@@ -5010,3 +5010,96 @@ Exp-066 生成结果：
   - `len=0` 替换用户数 `3515`
   - `len=1` 替换用户数 `1003`
 - 提交格式：校验通过。
+
+线上结果：
+
+- 提交时间：2026-06-30 13:12:38
+- 总分：`0.6313`
+- A1：`0.7594`
+- A2：`0.5033`
+
+结论：
+
+- A1 相比 Exp-063 的 `0.7590` 小幅提升到 `0.7594`，说明全标签权重从 `0.85` 提到 `0.90` 是正向但收益很小。
+- A2 相比 Exp-063 保持 `0.5033`，说明 `len=1` 没有明显带来新收益，但也没有伤分。
+- 后续不能继续只做硬替换或权重微调，应转向：
+  - A1：LP / majority / SIGN 的无泄漏 OOF 融合。
+  - A2：Exp044/Exp045 按历史长度桶做软排序融合，而不是继续扩大硬替换桶。
+
+---
+
+## Tool-034：Exp-068 A2按桶RRF软融合候选
+
+日期：2026-06-30
+
+参考建议：
+
+- 用户提供的外部建议指出：当前不缺“换大模型”，更缺：
+  - A1 的无泄漏 OOF stacking / gating。
+  - A2 的按历史长度桶软融合。
+- 对照当前实验，判断如下：
+  - A1 OOF stacking 有价值，但必须严格无泄漏，不能仓促写成验证集标签参与特征构造的假高分。
+  - A2 软融合最适合先落地，因为不需要重训，且可直接约束漂移。
+  - A2 ordered suffix transition 也有价值，但需要新增一套统计特征，排在 RRF 之后。
+  - A2 empirical-Bayes 用户画像 prior 有价值，但需要重构冷启动 prior，排在 suffix 之后。
+  - 继续 GAT/SAGE/SASRec 大搜索的性价比低，暂不优先。
+
+新增文件：
+
+- `framework/code/a2_rank_fusion.py`
+- `framework/scripts/build_exp068_a1_blend90_a2_rrf_soft_candidate.sh`
+
+核心改动：
+
+- 用 RRF 方式融合 Exp044 和 Exp045 的 A2 推荐列表：
+
+```text
+score(item) =
+    1 / (k + rank_base(item))
+  + lambda_bucket / (k + rank_alt(item))
+```
+
+- 默认桶权重：
+
+```text
+len=0:   1.20
+len=1:   0.35
+len=2-3: 0.20
+len=4-10:0.05
+len>10:  0.05
+```
+
+设计理由：
+
+- `len=0`：Exp063 已证明 Exp045 在空历史用户上有线上收益，因此给高权重。
+- `len=1`：Exp066 说明 len1 不伤分，但也没有明显收益，因此只软融合。
+- `len=2-3`：不做硬替换，只做 Top10 内部重排；这是测试集中最大桶，若 target 已在 Top10 内，重排可能提升 NDCG。
+- 长历史桶：只给极小探索权重，避免干扰稳定用户。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+DEVICE=cpu ./scripts/build_exp068_a1_blend90_a2_rrf_soft_candidate.sh
+```
+
+生成结果：
+
+- 候选包：`output/exp068_submit_a1_blend90_a2_rrf_soft/prediction.zip`
+- A1 类别分布：
+  - `{0: 78, 1: 385, 2: 283, 3: 71, 4: 1216, 5: 47, 6: 79, 7: 145, 8: 409, 9: 38}`
+- A2 漂移指标：
+  - 总体 `changed=56.6400%`
+  - 总体 `top1_changed=4.6600%`
+  - 总体 `overlap=96.9760%`
+  - `len=0`: `top1_changed=13.0014%`, `overlap=91.3969%`
+  - `len=1`: `top1_changed=0.0997%`, `overlap=100.0000%`
+  - `len=2-3`: `top1_changed=0.1565%`, `overlap=100.0000%`
+
+结论：
+
+- Exp068 满足建议中的漂移约束：
+  - 总 top1_changed 小于 `7%`。
+  - 总 Top10 overlap 大于 `95%`。
+  - `len=2-3` 没有大面积换 Top1，只是 Top10 内部重排。
+- 这是比 Exp067 硬替换 `len2-3` 更稳的 A2 进攻候选。
