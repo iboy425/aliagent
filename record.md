@@ -5470,3 +5470,86 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp075_a1_meta_threshold_a
 - 任意二阶画像组合没有超过稳定的前缀 EB，反而明显更差。
 - 推断原因：匿名画像列并非任意组合都有效，二阶组合会引入大量小样本噪声。
 - 不生成提交包，不保留实验脚本，避免后续误用。
+
+### Exp-077/078：A2 画像分群 gate 审计与候选
+
+日期：2026-06-30
+
+背景：
+
+- Exp045 多 seed feature ranker 离线很强，但整体线上 A2 降到 `0.4957`。
+- Exp063/066 证明只替换 `len=0` 冷启动用户有效，A2 到 `0.5033`。
+- Exp069 证明大范围 RRF/suffix 干扰非冷启动用户会降分，A2 到 `0.5017`。
+- 因此下一步不能再整桶或全量替换，而要学习“哪些用户画像分群适合使用 alt 推荐”。
+
+新增文件：
+
+- `framework/code/a2_profile_gate.py`
+  - `audit`：在训练集验证切分上比较 base/alt 推荐，选择稳定正收益画像分群。
+  - `predict`：正式测试集上只对命中的用户分群使用 alt A2，其余保留 base A2。
+- `framework/scripts/run_exp077_a2_profile_gate_audit.sh`
+  - 默认 base：Exp044 单 seed feature ranker；
+  - 默认 alt：Exp045 三 seed feature ranker；
+  - 默认只审计 `len=1,len=2-3,len=4-10,len>10`，不碰 `len=0`，因为 `len=0` 已由 EB 处理。
+- `framework/scripts/build_exp078_a1_exp075_a2_profile_gate_candidate.sh`
+  - A1 默认复用 Exp075；
+  - A2 默认以 Exp075/Exp070 EB 作为 base，以 Exp045 A2 作为 alt；
+  - 根据 Exp077 的 `policy.json` 生成候选包。
+
+原理：
+
+- 对每个验证用户同时生成 base 和 alt 推荐列表。
+- 按真实验证 target 计算单样本 `NDCG@10`。
+- 画像分群 key 形如：
+  - `len=2-3||u_cat_05||6`
+  - `len=1||u_cat_01+u_cat_02||6|2`
+- 只保留满足以下条件的分群：
+  - 样本数足够；
+  - 平均 `alt_ndcg - base_ndcg >= min_gain`；
+  - 多个 split 中至少若干 split 为正收益。
+- 正式预测时只判断测试用户是否命中这些分群，不使用任何测试标签。
+
+本地 smoke：
+
+```bash
+python3 framework/code/a2_profile_gate.py audit \
+  --data_path framework/data/rec_data \
+  --base_checkpoint framework/output/exp044_a2_feature_ranker_seed42/best_model.pt \
+  --alt_checkpoint framework/output/exp045_a2_feature_multiseed/seed42/best_model.pt \
+  --device cpu \
+  --batch_size 512 \
+  --max_val_samples 200 \
+  --split_seeds 42 \
+  --test_like_val \
+  --buckets len=1,len=2-3 \
+  --profile_specs single,prefix2 \
+  --min_samples 10 \
+  --min_split_samples 5 \
+  --min_positive_splits 1 \
+  --min_gain 0.001 \
+  --max_groups 5
+```
+
+smoke 结果：
+
+- `base=0.611941`
+- `alt=0.596045`
+- `gated=0.616187`
+- `gain=+0.004246`
+- 这只是链路验证，不作为提交依据。
+
+提交条件：
+
+- 先在 GPU 机器运行：
+
+```bash
+cd /home/aliagent/framework
+git pull origin main
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp077_a2_profile_gate_audit.sh
+```
+
+- 只有当 Exp077 多 split 审计满足以下条件时，才运行 Exp078：
+  - 总体 `gated_ndcg - base_ndcg >= +0.003`；
+  - `len=2-3` 或 `len>10` 至少一个桶有正收益；
+  - 测试集 `top1_changed` 控制在 `3%` 以内。
+- 如果不满足，直接放弃 Exp077/078，不提交。
