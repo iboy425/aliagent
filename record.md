@@ -5304,3 +5304,137 @@ bash scripts/build_exp070_a1_exp066_a2_coldstart_eb_candidate.sh
 - 风险：
   - Exp066 的 `len=0` 已来自 Exp045 模型，EB 只能通过重排进一步提升；
   - 线上不一定完全服从本地冷启动验证，但多切分验证显示用户画像先验是真信号。
+
+---
+
+## Tool-037：Exp-073/074/075 A1 OOF meta-stack + A2 EB 联合候选
+
+日期：2026-06-30
+
+背景：
+
+- 用户提醒：平台每次提交能同时看到 A1/A2 分数，最后提交机会不应只做单边保守改动。
+- A2 已有 Exp070 冷启动 EB 候选。
+- A1 需要在 Exp066 稳定线上进一步提升，但不能继续用 Exp069 的简单 gate。
+
+新增文件：
+
+- `framework/code/a1_sign_classwise_stack.py`
+- `framework/code/a1_sign_meta_stack.py`
+- `framework/scripts/run_exp073_a1_fulltrain_all_h2.sh`
+- `framework/scripts/build_exp074_a1_meta_a2_eb_candidate.sh`
+- `framework/scripts/build_exp075_a1_meta_threshold_a2_eb_candidate.sh`
+
+### Exp-073：all_h2 全标签训练
+
+目的：
+
+- 训练 `standard_struct_label_all_h2_rw` 的全标签版本，作为 A1 第三个专家。
+- 它和当前 Exp066 主力 `undir / undir_reverse` 互补：
+  - `undir`：无向标签传播；
+  - `undir_reverse`：无向 + 反向标签传播；
+  - `all_h2`：无向 + 正向 + 反向，标签传播跳数为 2。
+
+GPU 运行命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp073_a1_fulltrain_all_h2.sh
+```
+
+生成 checkpoint：
+
+- `output/exp073_a1_fulltrain_all_h2/all_h2_seed42_e15/best_model.pt`
+- `output/exp073_a1_fulltrain_all_h2/all_h2_seed777_e14/best_model.pt`
+- `output/exp073_a1_fulltrain_all_h2/all_h2_seed2024_e7/best_model.pt`
+- `output/exp073_a1_fulltrain_all_h2/all_h2_seed2026_e13/best_model.pt`
+- `output/exp073_a1_fulltrain_all_h2/all_h2_seed3407_e17/best_model.pt`
+
+注意：
+
+- 日志中的 `train=11001, val=11001` 是最终全标签训练模式。
+- `val_acc=0.97+` 只是训练监控，不是泛化验证分数。
+- 没有使用测试标签，不属于测试标签泄露。
+
+### Exp-074：无条件 A1 meta-stack + A2 EB
+
+方法：
+
+- 二层模型训练数据来自 Exp059 的 OOF split checkpoint。
+- 测试推理 source 来自：
+  - Exp061 全标签 `undir`
+  - Exp061 全标签 `undir_reverse`
+  - Exp073 全标签 `all_h2`
+- A2 复用 Exp070 冷启动 EB。
+
+OOF 审计：
+
+- `C=0.005`
+- `class_weight=none`
+- `mean_meta=0.766027`
+- `mean_base=0.764384`
+- `mean_gain=+0.001644`
+- `min_gain=-0.001826`
+
+GPU 生成结果：
+
+- 候选包：`output/exp074_submit_a1_meta_a2_eb/prediction.zip`
+- A1 分布：
+  - `{0: 68, 1: 376, 2: 259, 3: 61, 4: 1244, 5: 48, 6: 53, 7: 131, 8: 470, 9: 41}`
+
+结论：
+
+- Exp074 没有泄露，但 A1 分布相对 Exp066 漂移偏大。
+- 不作为最后提交首选。
+
+### Exp-075：置信度回退 A1 meta-stack + A2 EB
+
+方法改进：
+
+- 二层模型仍然来自 OOF。
+- 但不再无条件覆盖 base A1：
+  - 如果 meta 与 base 预测一致，使用 meta；
+  - 如果 meta 想改标签，必须满足 `predict_proba` 置信度阈值；
+  - 否则回退到 base。
+
+OOF 阈值审计 Top：
+
+- `C=0.005`
+- `class_weight=none`
+- `threshold=0.3`
+- `mean_meta=0.766575`
+- `mean_base=0.764384`
+- `mean_gain=+0.002192`
+- `min_gain=-0.001826`
+- `mean_changed=1.0411%`
+
+GPU 生成命令：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp075_a1_meta_threshold_a2_eb_candidate.sh
+```
+
+生成结果：
+
+- 候选包：`output/exp075_submit_a1_meta_threshold_a2_eb/prediction.zip`
+- A1 相对 base 改动：
+  - `changed_vs_base=1.1269%`
+- A1 分布：
+  - `{0: 75, 1: 384, 2: 284, 3: 73, 4: 1206, 5: 48, 6: 65, 7: 147, 8: 428, 9: 41}`
+- A2：
+  - 复用 Exp070 冷启动 EB；
+  - `len>=1` 不变。
+- 提交校验：
+  - A1 行数 `2751`，通过；
+  - A2 行数 `10000`，通过；
+  - `prediction.zip` 校验通过。
+
+提交判断：
+
+- Exp075 比 Exp074 更适合最后一次提交：
+  - OOF 平均提升更高；
+  - A1 改动比例从约 `5.59%` 降到约 `1.13%`；
+  - A1 分布更接近 Exp066 稳定线；
+  - A2 同时使用目前证据最强的冷启动 EB。
+- 推荐作为 2026-06-30 最后一次提交候选。
