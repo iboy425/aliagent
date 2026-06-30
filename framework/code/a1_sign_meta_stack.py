@@ -169,47 +169,61 @@ def run_audit(args):
     split_keys = sorted(split_data.keys(), key=int)
 
     results = []
+    thresholds = parse_float_list(args.thresholds)
     for c_value in parse_float_list(args.c_values):
         for class_weight in args.class_weights.split(","):
             class_weight = class_weight.strip()
             if not class_weight:
                 continue
-            loo_rows = []
+            threshold_rows = {threshold: [] for threshold in thresholds}
             for heldout in split_keys:
                 train_keys = [key for key in split_keys if key != heldout]
                 train_x = np.concatenate([split_data[key]["x"] for key in train_keys], axis=0)
                 train_y = np.concatenate([split_data[key]["y"] for key in train_keys], axis=0)
                 model = train_logistic(train_x, train_y, c_value, class_weight)
-                pred = model.predict(split_data[heldout]["x"])
-                meta_acc = acc(pred, split_data[heldout]["y"])
+                meta_proba = model.predict_proba(split_data[heldout]["x"])
+                meta_pred = np.argmax(meta_proba, axis=1).astype(np.int64)
+                meta_conf = np.max(meta_proba, axis=1)
 
                 val_idx = split_data[heldout]["val_idx"]
                 base_probs = base_probs_from_sources(split_data[heldout]["source_probs"])
                 base_pred = np.argmax(base_probs[val_idx], axis=1)
                 base_acc = acc(base_pred, split_data[heldout]["y"])
-                loo_rows.append({
-                    "heldout": int(heldout),
-                    "meta_acc": meta_acc,
-                    "base_acc": base_acc,
-                    "gain": meta_acc - base_acc,
-                })
-            mean_meta = float(np.mean([row["meta_acc"] for row in loo_rows]))
-            mean_base = float(np.mean([row["base_acc"] for row in loo_rows]))
-            result = {
-                "C": c_value,
-                "class_weight": class_weight,
-                "mean_meta": mean_meta,
-                "mean_base": mean_base,
-                "mean_gain": mean_meta - mean_base,
-                "min_gain": float(np.min([row["gain"] for row in loo_rows])),
-                "loo_rows": loo_rows,
-            }
-            results.append(result)
-            print(
-                f"C={c_value:g}\tclass_weight={class_weight}\t"
-                f"mean_meta={mean_meta:.6f}\tmean_base={mean_base:.6f}\t"
-                f"gain={mean_meta - mean_base:+.6f}\tmin_gain={result['min_gain']:+.6f}"
-            )
+
+                for threshold in thresholds:
+                    # threshold=0 表示纯元模型；阈值越高，越多低置信改动回退到base。
+                    use_meta = (meta_conf >= threshold) | (meta_pred == base_pred)
+                    pred = np.where(use_meta, meta_pred, base_pred)
+                    meta_acc = acc(pred, split_data[heldout]["y"])
+                    threshold_rows[threshold].append({
+                        "heldout": int(heldout),
+                        "meta_acc": meta_acc,
+                        "base_acc": base_acc,
+                        "gain": meta_acc - base_acc,
+                        "changed": float(np.mean(pred != base_pred)),
+                    })
+
+            for threshold, loo_rows in threshold_rows.items():
+                mean_meta = float(np.mean([row["meta_acc"] for row in loo_rows]))
+                mean_base = float(np.mean([row["base_acc"] for row in loo_rows]))
+                result = {
+                    "C": c_value,
+                    "class_weight": class_weight,
+                    "threshold": threshold,
+                    "mean_meta": mean_meta,
+                    "mean_base": mean_base,
+                    "mean_gain": mean_meta - mean_base,
+                    "min_gain": float(np.min([row["gain"] for row in loo_rows])),
+                    "mean_changed": float(np.mean([row["changed"] for row in loo_rows])),
+                    "loo_rows": loo_rows,
+                }
+                results.append(result)
+                print(
+                    f"C={c_value:g}\tclass_weight={class_weight}\tthreshold={threshold:g}\t"
+                    f"mean_meta={mean_meta:.6f}\tmean_base={mean_base:.6f}\t"
+                    f"gain={mean_meta - mean_base:+.6f}\tmin_gain={result['min_gain']:+.6f}\t"
+                    f"changed={result['mean_changed']:.4%}"
+                )
 
     results.sort(key=lambda item: (item["mean_gain"], item["min_gain"]), reverse=True)
     output = {
@@ -226,7 +240,7 @@ def run_audit(args):
     for item in results[:10]:
         print(
             f"C={item['C']:g}\tclass_weight={item['class_weight']}\t"
-            f"mean_meta={item['mean_meta']:.6f}\tgain={item['mean_gain']:+.6f}\t"
+            f"threshold={item['threshold']:g}\tmean_meta={item['mean_meta']:.6f}\tgain={item['mean_gain']:+.6f}\t"
             f"min_gain={item['min_gain']:+.6f}"
         )
     print(f"\n结果已保存: {os.path.join(args.output_dir, 'summary.json')}")
@@ -290,7 +304,14 @@ def run_infer(args):
         best["class_weight"],
     )
     test_idx = data["test_idx"].astype(np.int64)
-    pred = model.predict(meta[test_idx]).astype(np.int64)
+    meta_proba = model.predict_proba(meta[test_idx])
+    meta_pred = np.argmax(meta_proba, axis=1).astype(np.int64)
+    meta_conf = np.max(meta_proba, axis=1)
+    base_probs = base_probs_from_sources(source_probs)
+    base_pred = np.argmax(base_probs[test_idx], axis=1).astype(np.int64)
+    threshold = float(best.get("threshold", 0.0))
+    use_meta = (meta_conf >= threshold) | (meta_pred == base_pred)
+    pred = np.where(use_meta, meta_pred, base_pred).astype(np.int64)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
     pd.DataFrame({"test_idx": test_idx, "label": pred}).to_csv(args.output_path, index=False)
@@ -299,6 +320,7 @@ def run_infer(args):
     result = {
         "best": best,
         "class_distribution": distribution,
+        "changed_vs_base": float(np.mean(pred != base_pred)),
         "output_path": args.output_path,
     }
     if args.output_json:
@@ -309,6 +331,7 @@ def run_infer(args):
     print("A1 元模型 stacking 推理完成")
     print("=" * 100)
     print(f"best={best}")
+    print(f"changed_vs_base={result['changed_vs_base']:.4%}")
     print(f"class_distribution={distribution}")
     print(f"output={args.output_path}")
 
@@ -328,6 +351,8 @@ def parse_args():
     audit.add_argument("--sources", nargs="+", required=True)
     audit.add_argument("--c_values", default="0.02,0.05,0.1,0.2,0.5,1.0")
     audit.add_argument("--class_weights", default="none,balanced")
+    audit.add_argument("--thresholds", default="0,0.4,0.5,0.6,0.7,0.8",
+                       help="元模型覆盖base所需置信度；0表示不回退")
 
     infer = sub.add_parser("infer")
     infer.add_argument("--data_path", required=True)
