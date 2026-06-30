@@ -5199,3 +5199,108 @@ DEVICE=cpu ./scripts/build_exp069_a1_gate_a2_rrf_suffix_candidate.sh
   - A2 不再只是 RRF，而是补充了短历史最大桶的 ordered suffix 信息；
   - 总 top1_changed 仍低于建议上限 `7%`；
   - Top10 overlap 仍高于 `95%`。
+
+线上反馈：
+
+- 提交时间：2026-06-30 14:17:48
+- 总分：`0.6303`
+- 分类任务分数：`0.7590`
+- 推荐任务分数：`0.5017`
+
+结论：
+
+- Exp069 相比 Exp066 变差：
+  - A1 从 `0.7594` 回落到 `0.7590`，说明简单邻居 majority gate 没有线上收益；
+  - A2 从 `0.5033` 回落到 `0.5017`，说明 RRF/suffix 虽然漂移指标看似可控，但线上并不稳。
+- 后续不再沿着 Exp069 的 A1 gate 或 A2 非冷启动 RRF/suffix 继续微调。
+- 稳定基准回退为 Exp066：`A1=0.7594, A2=0.5033, total=0.6313`。
+
+---
+
+## Tool-036：Exp-070 A2 冷启动 Empirical-Bayes 画像先验
+
+日期：2026-06-30
+
+背景：
+
+- Exp069 说明不能继续大面积改动非冷启动用户。
+- 线上已验证有效的 A2 局部收益来自 `len=0` 冷启动桶：
+  - Exp044 A2：`0.5023`
+  - Exp063/Exp066 A2：`0.5033`
+- 因此本轮只优化空历史用户，不改 `len>=1` 的推荐列表。
+
+新增文件：
+
+- `framework/code/a2_coldstart_eb.py`
+- `framework/scripts/build_exp070_a1_exp066_a2_coldstart_eb_candidate.sh`
+
+方法：
+
+- 对用户画像前缀统计 target 分布：
+  - `u_cat_01`
+  - `u_cat_01,u_cat_02`
+  - `u_cat_01,u_cat_02,u_cat_03`
+- 使用经验贝叶斯回退：
+  - `lambda = n / (n + alpha)`
+  - 样本越多越相信细画像组合；
+  - 样本越少越回退到粗画像和全局热门。
+- 最佳参数：
+  - `depth=3`
+  - `alphas=[200,120,60]`
+  - `temperature=1.0`
+- 提交候选不直接使用纯 EB，而是与 Exp066 A2 做 RRF：
+  - `replace_buckets=len=0`
+  - `eb_weight=1.0`
+  - `rrf_k=20`
+
+离线冷启动验证：
+
+| seed | global_pop NDCG | EB NDCG | gain |
+| --- | ---: | ---: | ---: |
+| 42 | 0.331618 | 0.368556 | +0.036939 |
+| 777 | 0.329314 | 0.362262 | +0.032948 |
+| 2024 | 0.328816 | 0.363604 | +0.034788 |
+| 2026 | 0.320020 | 0.354308 | +0.034289 |
+| 3407 | 0.323685 | 0.353801 | +0.030116 |
+
+平均：
+
+- global_pop：`0.326690`
+- EB：`0.360506`
+- gain：`+0.033816`
+
+候选生成命令：
+
+```bash
+cd /home/aliagent/framework
+bash scripts/build_exp070_a1_exp066_a2_coldstart_eb_candidate.sh
+```
+
+生成结果：
+
+- 候选包：`framework/output/exp070_submit_a1_exp066_a2_coldstart_eb/prediction.zip`
+- A1：完全复用 Exp066，类别分布不变
+  - `{0: 78, 1: 385, 2: 283, 3: 71, 4: 1216, 5: 47, 6: 79, 7: 145, 8: 409, 9: 38}`
+- A2 相对 Exp066：
+  - 总体 `changed=34.1200%`
+  - 总体 `top1_changed=5.6900%`
+  - 总体 `overlap=99.9500%`
+  - `len=0`: `changed=97.0697%`, `top1_changed=16.1878%`, `overlap=99.8578%`
+  - `len>=1`: 完全不变
+
+参数对比：
+
+- 纯 EB：总 `top1_changed=10.3500%`，过激，不采用。
+- `eb_weight=0.5`：总 `top1_changed=0.8200%`，过于保守，收益可能不明显。
+- `eb_weight=1.0`：总 `top1_changed=5.6900%`，作为当前候选。
+- `eb_weight=1.25/1.5`：总 `top1_changed≈8%`，接近 Exp069 失败区间，不采用。
+
+提交判断：
+
+- Exp070 是比 Exp069 更干净的候选：
+  - A1 不变，归因清楚；
+  - A2 只改线上已证明有收益空间的冷启动桶；
+  - 非冷启动用户完全不变，避免再次破坏 `len=2-3` 大桶。
+- 风险：
+  - Exp066 的 `len=0` 已来自 Exp045 模型，EB 只能通过重排进一步提升；
+  - 线上不一定完全服从本地冷启动验证，但多切分验证显示用户画像先验是真信号。
