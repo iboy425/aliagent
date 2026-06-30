@@ -5553,3 +5553,56 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp077_a2_profile_gate_audit
   - `len=2-3` 或 `len>10` 至少一个桶有正收益；
   - 测试集 `top1_changed` 控制在 `3%` 以内。
 - 如果不满足，直接放弃 Exp077/078，不提交。
+
+GPU 审计结果：
+
+```text
+base=0.575215
+alt=0.581994
+gated=0.582834
+gain=+0.007619
+候选分群=58
+选中分群=30
+```
+
+分桶结果：
+
+| 桶 | 样本 | base | alt | gated | gain | use_alt |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| len=1 | 1248 | 0.550030 | 0.561350 | 0.562079 | +0.012050 | 85.74% |
+| len=2-3 | 5401 | 0.575917 | 0.580807 | 0.580933 | +0.005016 | 25.07% |
+| len=4-10 | 154 | 0.528577 | 0.556356 | 0.554771 | +0.026193 | 98.70% |
+| len>10 | 1004 | 0.609896 | 0.617975 | 0.623167 | +0.013270 | 68.03% |
+
+Exp078 生成结果：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp078_a1_exp075_a2_profile_gate_candidate.sh
+```
+
+- 候选包：`output/exp078_submit_a1_exp075_a2_profile_gate/prediction.zip`
+- A1：复用 Exp075，类别分布：
+  - `{0: 75, 1: 384, 2: 284, 3: 73, 4: 1206, 5: 48, 6: 65, 7: 147, 8: 428, 9: 41}`
+- A2 测试集漂移：
+  - 总体 `use_alt=27.6600%`
+  - 总体 `changed=18.5300%`
+  - 总体 `top1_changed=1.8200%`
+  - 总体 `overlap=98.3860%`
+- 分桶漂移：
+  - `len=0`: 完全不变；
+  - `len=1`: `use_alt=86.2413%`，但 `changed=0`，说明 Exp075 的 len1 已基本等同 alt 路线；
+  - `len=2-3`: `changed=25.4582%`，`top1_changed=2.7939%`；
+  - `len=4-10`: `changed=98.3607%`，`top1_changed=4.9180%`，但样本仅 `61`；
+  - `len>10`: `changed=69.0602%`，`top1_changed=5.7022%`。
+
+提交判断：
+
+- Exp078 满足预设条件：
+  - 审计总体增益 `+0.007619`，超过 `+0.003` 门槛；
+  - `len=2-3` 和 `len>10` 均为正收益；
+  - 测试集总体 `top1_changed=1.82%`，低于 `3%` 门槛。
+- 相比失败的 Exp069：
+  - Exp069 总体 `top1_changed=6.33%`，A2 线上降到 `0.5017`；
+  - Exp078 总体 `top1_changed=1.82%`，且只替换多 split 验证为正收益的画像分群。
+- 推荐提交 Exp078。
