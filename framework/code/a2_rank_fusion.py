@@ -10,7 +10,7 @@ score(item) = 1 / (k + rank_base) + lambda_bucket / (k + rank_alt)
 import argparse
 import os
 from collections import Counter, defaultdict
-from typing import Dict, List, Mapping, Sequence, Set
+from typing import Dict, List, Mapping, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -98,7 +98,55 @@ def add_popularity_scores(
     if weight <= 0:
         return
     for item, score in pop_scores.items():
-        scores[item] = scores.get(item, 0.0) + weight * score
+            scores[item] = scores.get(item, 0.0) + weight * score
+
+
+def build_suffix_transition_stats(
+    train_df: pd.DataFrame,
+    seq_col: str,
+    target_col: str = "target_iid",
+) -> Dict[int, Dict[Tuple[str, ...], Counter]]:
+    """统计有序后缀到target的转移分布
+
+    与无序共现不同，这里保留最后 n 个 item 的顺序：
+    - n=1: P(target | last1)
+    - n=2: P(target | last2 tuple)
+    - n=3: P(target | last3 tuple)
+    """
+    stats = {1: defaultdict(Counter), 2: defaultdict(Counter), 3: defaultdict(Counter)}
+    for _, row in train_df.iterrows():
+        target = str(row[target_col])
+        seq = parse_seq(row.get(seq_col))
+        for size in (1, 2, 3):
+            if len(seq) >= size:
+                key = tuple(seq[-size:])
+                stats[size][key][target] += 1
+    return stats
+
+
+def suffix_rank_lists(
+    seq: Sequence[str],
+    stats: Mapping[int, Mapping[Tuple[str, ...], Counter]],
+    min_count2: int,
+    min_count3: int,
+    topn: int,
+) -> Dict[int, List[str]]:
+    """获取当前用户的 suffix transition 推荐列表"""
+    result = {1: [], 2: [], 3: []}
+    for size in (1, 2, 3):
+        if len(seq) < size:
+            continue
+        key = tuple(seq[-size:])
+        counter = stats.get(size, {}).get(key)
+        if not counter:
+            continue
+        total = sum(counter.values())
+        if size == 2 and total < min_count2:
+            continue
+        if size == 3 and total < min_count3:
+            continue
+        result[size] = [item for item, _ in counter.most_common(topn)]
+    return result
 
 
 def stable_rank_items(
@@ -142,11 +190,21 @@ def fuse_one(
     pop_weight: float,
     rrf_k: float,
     topk: int,
+    suffix_lists: Mapping[int, Sequence[str]] = None,
+    suffix_weights: Mapping[int, float] = None,
 ) -> List[str]:
     """融合单个用户的两个推荐列表"""
     scores: Dict[str, float] = {}
     add_rank_scores(scores, base_items, 1.0, rrf_k)
     add_rank_scores(scores, alt_items, lambda_weight, rrf_k)
+    if suffix_lists and suffix_weights:
+        for size in (1, 2, 3):
+            add_rank_scores(
+                scores,
+                suffix_lists.get(size, []),
+                float(suffix_weights.get(size, 0.0)),
+                rrf_k,
+            )
     add_popularity_scores(scores, pop_scores, pop_weight)
     return stable_rank_items(scores, base_items, alt_items, popular_items, topk)
 
@@ -165,6 +223,14 @@ def main():
                         help="可选热门补充分数，如 len=0:0.001")
     parser.add_argument("--hard_buckets", default="",
                         help="这些桶直接使用alt，逗号分隔；默认全走软融合")
+    parser.add_argument("--suffix_buckets", default="",
+                        help="启用ordered suffix transition的桶，逗号分隔")
+    parser.add_argument("--suffix_weight1", type=float, default=0.0)
+    parser.add_argument("--suffix_weight2", type=float, default=0.0)
+    parser.add_argument("--suffix_weight3", type=float, default=0.0)
+    parser.add_argument("--suffix_min_count2", type=int, default=5)
+    parser.add_argument("--suffix_min_count3", type=int, default=5)
+    parser.add_argument("--suffix_topn", type=int, default=30)
     parser.add_argument("--rrf_k", type=float, default=60.0)
     parser.add_argument("--topk", type=int, default=10)
     parser.add_argument("--output_path", required=True)
@@ -173,6 +239,12 @@ def main():
     lambdas = parse_bucket_float_map(args.bucket_lambdas, default=0.0)
     pop_weights = parse_bucket_float_map(args.bucket_pop_weights, default=0.0)
     hard_buckets = parse_bucket_set(args.hard_buckets)
+    suffix_buckets = parse_bucket_set(args.suffix_buckets)
+    suffix_weights = {
+        1: args.suffix_weight1,
+        2: args.suffix_weight2,
+        3: args.suffix_weight3,
+    }
 
     base_df = pd.read_csv(args.base_a2)
     alt_df = pd.read_csv(args.alt_a2)
@@ -190,14 +262,29 @@ def main():
     global_pop = build_global_popularity(train_df)
     pop_scores = normalize_counter(global_pop)
     popular_items = [item for item, _ in global_pop.most_common()]
+    suffix_stats = build_suffix_transition_stats(train_df, args.seq_col)
 
     out_rows = []
     stats = defaultdict(list)
     top1_counter = Counter()
+    suffix_use_counter = Counter()
     for idx, uid in enumerate(base_uids):
-        bucket = bucket_seq_len(len(parse_seq(test_df.iloc[idx].get(args.seq_col))))
+        seq = parse_seq(test_df.iloc[idx].get(args.seq_col))
+        bucket = bucket_seq_len(len(seq))
         base_items = parse_prediction(base_df.iloc[idx]["prediction"])
         alt_items = parse_prediction(alt_df.iloc[idx]["prediction"])
+        suffix_lists = {}
+        if bucket in suffix_buckets:
+            suffix_lists = suffix_rank_lists(
+                seq=seq,
+                stats=suffix_stats,
+                min_count2=args.suffix_min_count2,
+                min_count3=args.suffix_min_count3,
+                topn=args.suffix_topn,
+            )
+            for size, items in suffix_lists.items():
+                if items and suffix_weights.get(size, 0.0) > 0:
+                    suffix_use_counter[f"{bucket}:last{size}"] += 1
 
         if bucket in hard_buckets:
             pred = stable_rank_items({}, alt_items, base_items, popular_items, args.topk)
@@ -211,6 +298,8 @@ def main():
                 pop_weight=pop_weights[bucket],
                 rrf_k=args.rrf_k,
                 topk=args.topk,
+                suffix_lists=suffix_lists,
+                suffix_weights=suffix_weights,
             )
 
         top1_counter[pred[0] if pred else ""] += 1
@@ -238,6 +327,12 @@ def main():
     print(f"bucket_lambdas={lambdas}")
     print(f"bucket_pop_weights={pop_weights}")
     print(f"hard_buckets={sorted(hard_buckets)}")
+    print(f"suffix_buckets={sorted(suffix_buckets)}")
+    print(
+        "suffix_weights="
+        f"last1:{args.suffix_weight1},last2:{args.suffix_weight2},last3:{args.suffix_weight3}, "
+        f"min2={args.suffix_min_count2}, min3={args.suffix_min_count3}, topn={args.suffix_topn}"
+    )
     print(
         f"总体 changed={avg(all_rows, 'changed'):.4%}, "
         f"top1_changed={avg(all_rows, 'top1_changed'):.4%}, "
@@ -257,6 +352,11 @@ def main():
     total = sum(top1_counter.values())
     for item, count in top1_counter.most_common(10):
         print(f"  {item}\t{count}\t{count / total:.4%}")
+
+    if suffix_use_counter:
+        print("\nSuffix使用统计:")
+        for key, count in suffix_use_counter.most_common():
+            print(f"  {key}\t{count}")
 
 
 if __name__ == "__main__":

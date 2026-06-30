@@ -5103,3 +5103,99 @@ DEVICE=cpu ./scripts/build_exp068_a1_blend90_a2_rrf_soft_candidate.sh
   - 总 Top10 overlap 大于 `95%`。
   - `len=2-3` 没有大面积换 Top1，只是 Top10 内部重排。
 - 这是比 Exp067 硬替换 `len2-3` 更稳的 A2 进攻候选。
+
+---
+
+## Tool-035：Exp-069 A1 gate + A2 suffix 联合候选
+
+日期：2026-06-30
+
+背景：
+
+- 用户认为 Exp068 还不够，今天只剩两次提交机会，不想把机会用在只做 RRF 软融合的候选上。
+- 外部建议中 A1/A2 两个方向都值得推进：
+  - A1：LP / 邻居多数类 gate。
+  - A2：ordered suffix transition。
+
+新增文件：
+
+- `framework/code/a1_neighbor_gate.py`
+- `framework/scripts/build_exp069_a1_gate_a2_rrf_suffix_candidate.sh`
+
+A1 无泄漏审计：
+
+```bash
+cd /home/aliagent/framework
+python3 code/a1_neighbor_gate.py audit \
+  --data_path data/cls_data/A1.npz \
+  --base_dir output/exp059_a1_sign_directed_label_feature_audit \
+  --device cpu \
+  --checkpoint_weights 0.3,0.7 \
+  --split_seeds 42,777,2024,2026,3407 \
+  --experts majority,lp \
+  --min_neighbors 2,3 \
+  --purity_thresholds 0.8,0.85,0.9,0.95 \
+  --max_model_confs 0.65,0.75,0.85,0.95 \
+  --expert_weights 0.35,0.5,0.65,0.8,1.0 \
+  --require_disagrees 0,1 \
+  --lp_alpha 0.5 \
+  --lp_iter 20 \
+  --output_json output/exp069_a1_neighbor_gate_audit/results.json
+```
+
+审计结论：
+
+- baseline 五折均值约 `0.764383`。
+- 最优 gate 均值 `0.764566`，平均提升 `+0.000183`。
+- 最优参数：
+  - expert：`majority`
+  - `min_neighbors=2`
+  - `purity_threshold=0.85`
+  - `max_model_conf=0.65`
+  - `expert_weight=0.35`
+  - `require_disagree=False`
+- 结论：A1 gate 不是大突破，但无泄漏审计为小正收益，适合作为低风险小增强。
+
+A2 suffix 探测：
+
+- 在 Exp068 RRF 基础上尝试 ordered suffix transition。
+- 强 suffix 权重会把 top1_changed 推到 `9%+`，风险偏高。
+- 选用保守版本：
+  - `suffix_buckets=len=2-3`
+  - `suffix_weight1=0.04`
+  - `suffix_weight2=0.08`
+  - `suffix_weight3=0.12`
+  - `suffix_min_count2=10`
+  - `suffix_min_count3=10`
+
+Exp069 生成命令：
+
+```bash
+cd /home/aliagent/framework
+DEVICE=cpu ./scripts/build_exp069_a1_gate_a2_rrf_suffix_candidate.sh
+```
+
+生成结果：
+
+- 候选包：`output/exp069_submit_a1_gate_a2_rrf_suffix/prediction.zip`
+- A1：
+  - gate 选择测试节点数：`950`
+  - 类别分布：`{0: 78, 1: 385, 2: 283, 3: 71, 4: 1217, 5: 47, 6: 79, 7: 145, 8: 409, 9: 37}`
+  - 相比 Exp066 只出现极小分布变化，风险低。
+- A2：
+  - 总体 `changed=70.8200%`
+  - 总体 `top1_changed=6.3300%`
+  - 总体 `overlap=96.9760%`
+  - `len=2-3`: `changed=63.5449%`, `top1_changed=3.8891%`, `overlap=100.0000%`
+  - suffix 使用：
+    - `len=2-3:last1` 覆盖 `4448`
+    - `len=2-3:last2` 覆盖 `1012`
+    - `len=2-3:last3` 覆盖 `270`
+
+提交判断：
+
+- Exp069 比 Exp068 更值得使用一次提交机会：
+  - A1 有低风险 gate 小增强；
+  - A2 不再只是 RRF，而是补充了短历史最大桶的 ordered suffix 信息；
+  - 总 top1_changed 仍低于建议上限 `7%`；
+  - Top10 overlap 仍高于 `95%`。
