@@ -5695,3 +5695,58 @@ bash scripts/build_exp079_a1_best_a2_exp066_stable.sh
 - profile gate 在同集审计里看起来有效，但留一评估不稳定。
 - 这与 Exp078 线上 A2 下降一致。
 - 该方法更适合做“诊断哪些桶 alt 有潜力”，不适合直接作为提交策略，除非完整 LOSO 审计转正。
+
+### Exp-081/082：A2 严格画像分群 gate
+
+日期：2026-07-02
+
+背景：
+
+- 用户要求下一次提交前 A1/A2 都要优化，不能只提交 Exp079 回滚包。
+- Exp078 的 profile gate 失败原因包括：
+  - 审计包含 `len=1`，但正式 base 在 `len=1` 已经是 Exp066 替换路线，审计/提交不一致；
+  - 分群选择条件较松，`positive_splits >= 2`，仍有选择偏差；
+  - 相对 Exp066，总体 `top1_changed=7.51%`，过激。
+
+新增文件：
+
+- `framework/scripts/run_exp081_a2_profile_gate_strict_audit.sh`
+- `framework/scripts/build_exp082_a1_best_a2_strict_profile_gate.sh`
+
+Exp081 相比 Exp077 的收紧：
+
+- 只审计 `len=2-3,len=4-10,len>10`：
+  - 不再碰 `len=0`，冷启动由 Exp066/历史稳定线处理；
+  - 不再碰 `len=1`，避免 base 不一致。
+- 分群条件：
+  - `min_samples=100`
+  - `min_split_samples=25`
+  - `min_positive_splits=3`
+  - `min_gain=0.015`
+  - `max_groups=12`
+
+Exp082 设计：
+
+- A1：使用当前线上最好 A1，即 Exp078/Exp075 的 meta-stack，线上已到 `0.7601`。
+- A2：以 Exp066 A2 作为 base，只对 Exp081 严格选出的分群使用 Exp045 alt。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+git pull origin main
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp081_a2_profile_gate_strict_audit.sh
+```
+
+只有满足以下条件才运行 Exp082 并考虑提交：
+
+- `selected_count > 0`
+- 审计总体 `gain_vs_base > 0`
+- 生成候选后，相对 Exp066 的总体 `top1_changed <= 3%`
+- `len=2-3` 的 `top1_changed` 不超过约 `2%`
+
+如果不满足：
+
+- 放弃严格 profile gate；
+- 使用 Exp079 作为安全基线；
+- 后续 A2 转向重新训练更稳的模型，而不是继续分群 gate。
