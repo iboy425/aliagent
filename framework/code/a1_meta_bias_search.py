@@ -74,6 +74,17 @@ def apply_bias(scores: np.ndarray, bias: Mapping[str, float]) -> np.ndarray:
     return np.argmax(scores * weights.reshape(1, -1), axis=1).astype(np.int64)
 
 
+def select_audit_result(audit: Mapping, select_name: str) -> Mapping:
+    """从审计结果中选择指定候选"""
+    if not select_name:
+        return audit["best"]
+    for item in audit.get("results", []):
+        if item.get("name") == select_name:
+            return item
+    names = [item.get("name") for item in audit.get("results", [])]
+    raise ValueError(f"没有找到select_name={select_name}，可选项: {names[:20]}")
+
+
 def make_bias_candidates(classes: List[int], factors: List[float]) -> List[Dict]:
     """生成单类别缩放候选"""
     candidates = [{"name": "identity", "bias": {}}]
@@ -223,7 +234,7 @@ def run_infer(args):
     device = get_device(args.device)
     data = GraphDataset.load(args.data_path)
     audit = json.load(open(args.audit_json, encoding="utf-8"))
-    best = audit["best"]
+    best = select_audit_result(audit, args.select_name)
     base_best = audit["base_best"]
     scores = build_full_scores(data, args, device, base_best)
     pred = apply_bias(scores, best["bias"])
@@ -283,6 +294,8 @@ def parse_args():
     infer.add_argument("--oof_sources", nargs="+", default=[])
     infer.add_argument("--output_path", required=True)
     infer.add_argument("--output_json", default="")
+    infer.add_argument("--select_name", default="",
+                       help="指定使用某个审计候选；为空时使用summary.json中的best")
     add_common_args(infer)
     return parser.parse_args()
 

@@ -5900,3 +5900,34 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp089_joint_a1_bias_a2_ex
 - 若 Exp088 最优仍是 `identity`，或 `mean_gain <= 0`：不改 A1，提交优先级回到 Exp086。
 - 若最佳 bias 的 `mean_changed` 很大：不提交，避免 A1 类别分布被整体推偏。
 - 若最佳 bias 有小幅正收益且改动可控：提交 Exp089，因为它同时包含 A1 新后处理和 A2 Exp086。
+
+### Exp-090：A1 稳定 meta-bias + A2 Exp086 联合候选
+
+日期：2026-07-02
+
+Exp088 GPU 审计反馈：
+
+- `c8_x1.05`
+  - `mean_gain=+0.001279`
+  - `min_gain=-0.002740`
+  - `mean_changed=1.4795%`
+  - 平均提升最高，但有一个 heldout split 明确负收益。
+- `c2_x0.95`
+  - `mean_gain=+0.000731`
+  - `min_gain=+0.000000`
+  - `mean_changed=0.4018%`
+  - 平均提升较小，但多 split 最差不掉分，改动更小。
+
+代码调整：
+
+- `framework/code/a1_meta_bias_search.py`
+  - `infer` 新增 `--select_name`，允许指定使用某个审计候选，而不是强制使用 `summary.json` 的平均最优。
+- 新增 `framework/scripts/build_exp090_joint_a1_safe_bias_a2_exp086.sh`
+  - 默认 `SELECT_NAME=c2_x0.95`
+  - A2 继续复用 Exp086。
+
+判断：
+
+- Exp089 使用 `c8_x1.05`，属于激进候选。
+- Exp090 使用 `c2_x0.95`，属于稳定候选。
+- 当前如果只提交一次，优先提交 Exp090；如果 Exp090 线上 A1/A2 都正向，再考虑扩大到 Exp089 或 Exp085。
