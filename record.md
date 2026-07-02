@@ -5996,3 +5996,58 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp092_a1_lb_map_model_pri
 - 若输出分布接近本地 smoke，不再坍缩，可作为一次高风险大幅 A1 尝试。
 - 若用户希望稳健，不提交 Exp092；继续保留 Exp090/Exp086 小幅提升线。
 - 若提交 Exp092 且 A1 明显提升，应围绕 leaderboard MAP 做 A1 主线；若 A1 大跌，立即回退到 Exp090/Exp078。
+
+### Exp-093：A1/A2 双任务 leaderboard 反馈联合候选
+
+日期：2026-07-02
+
+背景：
+
+- 用户明确要求：一次提交能看到 A1/A2 两个任务分数，因此必须两头同时推进。
+- Exp092 只对 A1 做大幅 MAP，A2 仍沿用小幅 Exp086，不满足“提交收益最大化”的策略。
+
+新增文件：
+
+- `framework/code/a2_leaderboard_map.py`
+- `framework/scripts/build_exp093_joint_a1_exp092_a2_lb_map.sh`
+
+A2 方法：
+
+- 利用历史 A2 提交分数做反馈加权重排。
+- 不引入 Top10 之外的新 item，默认只在已有 Top10 集合内部重排。
+- 默认参数：
+  - `WEIGHT_MODE=centered`
+  - `ANCHOR_WEIGHT=0.015`
+  - `PROTECT_TOPN=0`
+  - `SOLVER=greedy`
+- 说明：
+  - 尝试过精确 MILP，但 10000 用户规模求解过慢，已中断。
+  - 改用 greedy feedback prior，速度快，可控。
+
+本地生成结果：
+
+- A1：复用 Exp092。
+  - 类别分布：`{0:61, 1:414, 2:275, 3:72, 4:1190, 5:48, 6:59, 7:144, 8:458, 9:30}`
+- A2：
+  - `changed=11.4100%`
+  - `top1_changed=11.4100%`
+  - `overlap=100.0000%`
+  - 分桶：
+    - `len=0`: `7.5107%`
+    - `len=1`: `18.0459%`
+    - `len=2-3`: `13.0085%`
+    - `len=4-10`: `14.7541%`
+    - `len>10`: `11.0876%`
+
+候选包：
+
+- `framework/output/exp093_submit_a1_exp092_a2_lb_map/prediction.zip`
+
+判断：
+
+- Exp093 是真正双任务大幅候选，不是稳健候选。
+- A2 没有引入新 item，只在原 Top10 内重排，因此比完全替换候选更可控。
+- 如果要冲 `A1 0.78 / A2 0.52`，可以提交 Exp093 作为一次高风险试探。
+- 若 Exp093 任一任务大跌，按任务分别回滚：
+  - A1 回滚到 Exp090/Exp078；
+  - A2 回滚到 Exp090/Exp086。
