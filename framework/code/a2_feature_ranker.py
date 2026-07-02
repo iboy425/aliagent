@@ -352,8 +352,12 @@ def train(args):
     user_lookup = user_df.set_index("uid")
     lengths = test_like_lengths(test_df, test_seq_col)
 
-    trn_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
-    if args.test_like_val:
+    if args.train_all:
+        trn_df = train_df.copy()
+        val_df = pd.DataFrame(columns=train_df.columns)
+    else:
+        trn_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
+    if (not args.train_all) and args.test_like_val:
         val_df = apply_fixed_test_like_truncation(val_df, lengths, seq_col, args.seed)
 
     trn_dataset = A2FeatureDataset(
@@ -365,7 +369,7 @@ def train(args):
         test_lengths=lengths,
         random_test_like=args.random_test_like_train,
     )
-    val_dataset = A2FeatureDataset(val_df, user_lookup, bundle, seq_col, args.max_len)
+    val_dataset = None if args.train_all else A2FeatureDataset(val_df, user_lookup, bundle, seq_col, args.max_len)
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     pin_memory = device.type == "cuda"
@@ -377,14 +381,16 @@ def train(args):
         pin_memory=pin_memory,
         persistent_workers=args.num_workers > 0,
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=args.num_workers > 0,
-    )
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=args.num_workers > 0,
+        )
 
     user_cardinalities = [len(bundle.user_value_maps[col]) for col in bundle.user_cols]
     model = A2FeatureRanker(
@@ -409,7 +415,8 @@ def train(args):
     print("=" * 100)
     print("A2用户画像序列排序模型训练")
     print(f"device={device}, seq_col={seq_col}, targets={len(bundle.target_items)}, user_cols={bundle.user_cols}")
-    print(f"train={len(trn_dataset)}, val={len(val_dataset)}, test_like_val={args.test_like_val}")
+    val_size = 0 if val_dataset is None else len(val_dataset)
+    print(f"train={len(trn_dataset)}, val={val_size}, test_like_val={args.test_like_val}, train_all={args.train_all}")
     print("=" * 100)
 
     for epoch in range(1, args.epochs + 1):
@@ -432,9 +439,12 @@ def train(args):
             total_loss += float(loss.item()) * len(y)
             total_count += len(y)
 
-        metrics = evaluate_model(model, val_loader, bundle.target_items, device, args.topk)
         train_loss = total_loss / max(total_count, 1)
-        scheduler.step(metrics["ndcg"])
+        if args.train_all:
+            metrics = {"ndcg": 0.0, "hit": 0.0, "mrr": 0.0}
+        else:
+            metrics = evaluate_model(model, val_loader, bundle.target_items, device, args.topk)
+            scheduler.step(metrics["ndcg"])
         row = {
             "epoch": epoch,
             "train_loss": train_loss,
@@ -450,6 +460,11 @@ def train(args):
                 f"Hit={metrics['hit']:.6f} MRR={metrics['mrr']:.6f} "
                 f"lr={optimizer.param_groups[0]['lr']:.6g}"
             )
+
+        if args.train_all:
+            best_metrics = dict(row)
+            save_checkpoint(os.path.join(args.output_dir, "best_model.pt"), model, bundle, args, best_metrics)
+            continue
 
         if metrics["ndcg"] > best_ndcg:
             best_ndcg = metrics["ndcg"]
@@ -900,6 +915,8 @@ def build_parser():
     train_parser.add_argument("--log_interval", type=int, default=1)
     train_parser.add_argument("--test_like_val", action="store_true")
     train_parser.add_argument("--random_test_like_train", action="store_true")
+    train_parser.add_argument("--train_all", action="store_true",
+                              help="正式重训模式：使用全部train.csv训练，不划分验证集，不早停")
 
     pred_parser = subparsers.add_parser("predict", parents=[common])
     pred_parser.add_argument("--checkpoint", type=str, required=True)

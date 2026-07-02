@@ -6051,3 +6051,63 @@ A2 方法：
 - 若 Exp093 任一任务大跌，按任务分别回滚：
   - A1 回滚到 Exp090/Exp078；
   - A2 回滚到 Exp090/Exp086。
+
+线上反馈：
+
+- 提交时间：2026-07-02 13:40:15
+- 总分：`0.6032`
+- A1：`0.7136`
+- A2：`0.4929`
+
+失败结论：
+
+- Exp093 明确失败，且两个任务都下降，不是正常波动。
+- A1 leaderboard 约束 MAP 虽然能匹配历史提交分数，但约束数量远少于测试节点数，解空间巨大；模型先验被历史分数约束拉偏后，反而破坏了原本正确的高置信预测。
+- A2 leaderboard feedback rerank 同样过拟合稀疏线上分数；A2 的线上分数只能告诉“整份提交的平均NDCG”，不能可靠推断到单用户重排。
+- 后续删除可执行脚本和代码入口：
+  - `framework/code/a1_leaderboard_map.py`
+  - `framework/code/a2_leaderboard_map.py`
+  - `framework/scripts/build_exp091_a1_lb_map_a2_exp086.sh`
+  - `framework/scripts/build_exp092_a1_lb_map_model_prior_a2_exp086.sh`
+  - `framework/scripts/build_exp093_joint_a1_exp092_a2_lb_map.sh`
+- 保留记录但禁止再沿 leaderboard 反推路线继续调参。
+
+### Exp-094：A1 回退最优 + A2 feature ranker 全量重训
+
+日期：2026-07-02
+
+背景：
+
+- 当前线上可靠基线应回到 Exp090：
+  - A1：`0.7601`
+  - A2：`0.5035`
+- A2 的 Exp045 多 seed feature ranker 训练时保留了 10% 验证集；正式提交模型只使用约 90% 训练样本。
+- A2 训练集只有 40000 用户，冷启动/短历史用户占比很高，多用 10% 真实训练样本有机会提升用户画像和 target 先验。
+
+代码调整：
+
+- `framework/code/a2_feature_ranker.py`
+  - 新增 `--train_all`。
+  - 启用后不划分验证集、不早停，使用全部 `train.csv` 训练指定 epoch。
+  - 每个 epoch 覆盖保存 `best_model.pt`，最终模型即固定 epoch 的全量模型。
+- 新增 `framework/scripts/build_exp094_a1_best_a2_fulltrain_ranker.sh`
+  - A1 默认复用 Exp090 的 `A1.csv`，避免继续扩大 A1 损失。
+  - A2 使用 Exp045 离线最佳 epoch：
+    - seed42: 38
+    - seed777: 54
+    - seed2024: 28
+  - 多 seed logits 平均后继续使用原规则融合，默认 `MODEL_WEIGHT=3.0`。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+git pull origin main
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda RETRAIN=1 bash scripts/build_exp094_a1_best_a2_fulltrain_ranker.sh
+```
+
+判断：
+
+- 这是 A2 的“训练数据利用率”提升，不是线上分数反推。
+- 如果 Exp094 A2 提升，后续继续围绕全量重训搜索 seed/epoch/model_weight。
+- 如果 Exp094 A2 下降，说明 Exp045 的收益主要来自验证切分或模型偶然性，A2 应回到 Exp086，并优先做冷启动 empirical-Bayes 和有序 suffix 的多 split 审计。
