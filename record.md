@@ -5750,3 +5750,55 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp081_a2_profile_gate_stric
 - 放弃严格 profile gate；
 - 使用 Exp079 作为安全基线；
 - 后续 A2 转向重新训练更稳的模型，而不是继续分群 gate。
+
+### Exp-083/084：A2 保护 TopN 融合
+
+日期：2026-07-02
+
+背景：
+
+- Exp069/Exp078 的共同问题是 A2 `top1_changed` 偏高，线上 A2 下降。
+- Exp066 的 A2 虽然不一定最优，但 Top1 分布已经被线上验证稳定。
+- NDCG@10 不只看 Top1，也看第 2-10 位；因此可以尝试：
+  - 保留 Exp066 的 Top1 或 Top2；
+  - 用 Exp045 多 seed 模型补强后续位置。
+
+新增文件：
+
+- `framework/code/a2_protected_blend.py`
+- `framework/scripts/run_exp083_a2_protected_blend_audit.sh`
+- `framework/scripts/build_exp084_a1_best_a2_protected_blend.sh`
+
+方法：
+
+- `keep_topn=1`：
+  - 完全保留 base 第 1 位；
+  - 从 alt 推荐列表中按顺序填补第 2-10 位；
+  - alt 中已有 base Top1 的 item 会跳过，避免重复。
+- `keep_topn=2`：
+  - 保留 base 前 2 位，再用 alt 补齐。
+- 审计桶：
+  - `len=2-3`
+  - `len>10`
+  - `len=2-3+len>10`
+  - `len=2-3+len=4-10+len>10`
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+git pull origin main
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp083_a2_protected_blend_audit.sh
+```
+
+提交条件：
+
+- `mean_gain > 0`
+- `min_gain` 不明显为负；
+- 生成 Exp084 后，总体 `top1_changed` 应该为 `0%`，因为保护了 base Top1；
+- 如果 Exp083 最优是 `keep_topn=1` 且多 split 稳定，可以考虑提交 Exp084。
+
+如果 Exp083 不通过：
+
+- A2 不再继续从 Exp045 推荐列表做后处理；
+- 回到 Exp079 安全线，后续改为重新训练模型或改 A1。
