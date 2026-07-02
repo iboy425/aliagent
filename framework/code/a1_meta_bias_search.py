@@ -235,9 +235,12 @@ def run_infer(args):
     data = GraphDataset.load(args.data_path)
     audit = json.load(open(args.audit_json, encoding="utf-8"))
     best = select_audit_result(audit, args.select_name)
-    base_best = audit["base_best"]
+    base_best = audit.get("base_best", audit["best"])
     scores = build_full_scores(data, args, device, base_best)
-    pred = apply_bias(scores, best["bias"])
+    if args.output_scores_npy:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output_scores_npy)), exist_ok=True)
+        np.save(args.output_scores_npy, scores.astype(np.float32))
+    pred = apply_bias(scores, best.get("bias", {}))
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
     test_idx = data["test_idx"].astype(np.int64)
@@ -252,6 +255,7 @@ def run_infer(args):
         "changed_vs_unbiased": float(np.mean(pred != base_pred)),
         "class_distribution": distribution,
         "output_path": args.output_path,
+        "output_scores_npy": args.output_scores_npy,
     }
     if args.output_json:
         with open(args.output_json, "w", encoding="utf-8") as f:
@@ -294,6 +298,8 @@ def parse_args():
     infer.add_argument("--oof_sources", nargs="+", default=[])
     infer.add_argument("--output_path", required=True)
     infer.add_argument("--output_json", default="")
+    infer.add_argument("--output_scores_npy", default="",
+                       help="可选：保存未加bias前的测试节点概率矩阵npy")
     infer.add_argument("--select_name", default="",
                        help="指定使用某个审计候选；为空时使用summary.json中的best")
     add_common_args(infer)
