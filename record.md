@@ -5802,3 +5802,54 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp083_a2_protected_blend_au
 
 - A2 不再继续从 Exp045 推荐列表做后处理；
 - 回到 Exp079 安全线，后续改为重新训练模型或改 A1。
+
+### Exp-085/086/087：A2 严格分群 gate 的 Top1 保护版本
+
+日期：2026-07-02
+
+背景：
+
+- Exp078 线上反馈显示原始 profile gate 伤害 A2：A2 从 Exp066 的 `0.5033` 降到 `0.5014`。
+- Exp081 严格 gate 审计只保留 7 个多切分稳定画像分群，离线从 `base=0.580007` 到 `gated=0.583967`。
+- Exp083 说明只保护 Top1 后再改后续排序有正向信号，但全桶替换会导致后九位漂移过大。
+
+代码修改：
+
+- 修改 `framework/code/a2_profile_gate.py`
+  - 新增 `--keep_topn` 的保护融合逻辑：命中分群时先保留 base 前 N 位，再用 alt/base 补齐去重。
+  - 新增 `--predict_buckets`：预测阶段只启用指定历史长度桶，便于把严格 gate 裁剪成更保守候选。
+- 新增脚本：
+  - `framework/scripts/build_exp085_a1_best_a2_strict_gate_keep_top1.sh`
+  - `framework/scripts/build_exp086_a1_best_a2_strict_gate_midlong_keep_top1.sh`
+
+生成候选：
+
+- Exp085：
+  - A1：沿用当前线上最优 Exp075/078 A1，线上已验证 `0.7601`。
+  - A2：Exp081 严格 7 分群全部启用，保护 Exp066 Top1。
+  - 输出：`framework/output/exp085_submit_a1_best_a2_strict_gate_keep_top1/prediction.zip`
+  - 相对 Exp066 A2：`changed=10.7800%`，`top1_changed=0.0000%`，`top10_overlap=99.0740%`。
+- Exp086：
+  - A2 只启用 `len=4-10,len>10`，排除人数较多且审计收益较弱的 `len=2-3`。
+  - 输出：`framework/output/exp086_submit_a1_best_a2_strict_gate_midlong_keep_top1/prediction.zip`
+  - 相对 Exp066 A2：`changed=5.0500%`，`top1_changed=0.0000%`，`top10_overlap=99.5880%`。
+- Exp087：
+  - 通过复用 Exp086 脚本并设置 `PREDICT_BUCKETS=len>10` 生成。
+  - 输出：`framework/output/exp087_submit_a1_best_a2_strict_gate_long_keep_top1/prediction.zip`
+  - 相对 Exp066 A2：`changed=4.5900%`，`top1_changed=0.0000%`，`top10_overlap=99.6320%`。
+
+判断：
+
+- 不建议提交 Exp084：虽然 `top1_changed=0`，但整体 `changed=53.1400%`，后九位漂移过大，且 Exp083 多切分 `min_gain` 为负。
+- Exp082 不如 Exp085：两者覆盖相同严格分群，但 Exp082 仍有 `top1_changed=1.0500%`。
+- 当前推荐优先级：
+  1. Exp086：风险/收益折中最好，改动小且保留中长历史用户收益。
+  2. Exp085：更激进，可能收益更大，但包含 `len=2-3`，线上风险略高。
+  3. Exp087：最保守，只验证长历史用户后九位排序收益。
+  4. Exp079：完全安全回滚线，不验证新 A2。
+
+提交策略：
+
+- 如果当天只剩 1 次提交，优先提交 Exp086。
+- 如果当天有 2 次提交，可先提交 Exp086；若 A2 提升，再用 Exp085 扩大覆盖。
+- 线上反馈回来后按 A1/A2 分数分别记录，不再只看总分。

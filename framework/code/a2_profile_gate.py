@@ -459,10 +459,41 @@ def overlap_ratio(items_a: Sequence[str], items_b: Sequence[str], topk: int) -> 
     return len(set(items_a[:topk]) & set(items_b[:topk])) / max(topk, 1)
 
 
+def protected_merge(base_items: Sequence[str], alt_items: Sequence[str], keep_topn: int, topk: int) -> List[str]:
+    """保护 base 前 keep_topn 个位置，再用 alt/base 补齐"""
+    if keep_topn <= 0:
+        return list(alt_items[:topk])
+    result = []
+    seen = set()
+    for item in base_items[:keep_topn]:
+        if item and item not in seen:
+            result.append(item)
+            seen.add(item)
+    for item in alt_items:
+        if item and item not in seen:
+            result.append(item)
+            seen.add(item)
+        if len(result) >= topk:
+            return result[:topk]
+    for item in base_items:
+        if item and item not in seen:
+            result.append(item)
+            seen.add(item)
+        if len(result) >= topk:
+            break
+    return result[:topk]
+
+
 def run_predict(args):
     """根据审计策略生成 A2"""
     data = json.load(open(args.policy_json, encoding="utf-8"))
     selected_groups = data["policy"]["selected_groups"]
+    if args.predict_buckets:
+        allowed_buckets = set(parse_csv_list(args.predict_buckets))
+        selected_groups = [
+            group for group in selected_groups
+            if group.get("bucket") in allowed_buckets
+        ]
     base_df = pd.read_csv(args.base_a2)
     alt_df = pd.read_csv(args.alt_a2)
     test_df = pd.read_csv(args.test_csv)
@@ -481,7 +512,7 @@ def run_predict(args):
         base_pred = parse_prediction(base_df.iloc[idx]["prediction"])
         alt_pred = parse_prediction(alt_df.iloc[idx]["prediction"])
         use_alt = match_policy(row, bucket, selected_groups)
-        pred = alt_pred if use_alt else base_pred
+        pred = protected_merge(base_pred, alt_pred, args.keep_topn, args.topk) if use_alt else base_pred
         rows.append({"uid": str(row["uid"]), "prediction": ",".join(pred[:args.topk])})
         stats[bucket].append({
             "use_alt": float(use_alt),
@@ -503,6 +534,7 @@ def run_predict(args):
     print(f"policy={args.policy_json}")
     print(f"output={args.output_path}")
     print(f"selected_groups={len(selected_groups)}")
+    print(f"keep_topn={args.keep_topn}")
     print(
         f"总体 use_alt={avg(all_rows, 'use_alt'):.4%}, "
         f"changed={avg(all_rows, 'changed'):.4%}, "
@@ -576,6 +608,10 @@ def parse_args():
     predict.add_argument("--test_csv", default="data/rec_data/test.csv")
     predict.add_argument("--user_csv", default="data/rec_data/user.csv")
     predict.add_argument("--seq_col", default="item_seq_raw")
+    predict.add_argument("--keep_topn", type=int, default=0,
+                         help="命中分群时保护base前N位；0表示直接使用alt")
+    predict.add_argument("--predict_buckets", default="",
+                         help="预测阶段只启用这些历史长度桶，逗号分隔；为空表示使用policy全部分群")
     predict.add_argument("--topk", type=int, default=10)
     predict.add_argument("--output_path", required=True)
     return parser.parse_args()
