@@ -5853,3 +5853,50 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp083_a2_protected_blend_au
 - 如果当天只剩 1 次提交，优先提交 Exp086。
 - 如果当天有 2 次提交，可先提交 Exp086；若 A2 提升，再用 Exp085 扩大覆盖。
 - 线上反馈回来后按 A1/A2 分数分别记录，不再只看总分。
+
+### Exp-088/089：A1 meta-bias 审计 + A2 Exp086 联合候选
+
+日期：2026-07-02
+
+背景：
+
+- 用户提醒：线上能同时看到 A1/A2 两个分数，因此后续提交应尽量同时携带 A1 与 A2 的正向改动，最大化每次提交反馈价值。
+- A1 当前最好线上结果来自 Exp075/078：`0.7601`。
+- A2 当前稳定线上结果来自 Exp066：`0.5033`，Exp086 是基于严格分群和 Top1 保护的低风险 A2 新候选。
+
+新增文件：
+
+- `framework/code/a1_meta_bias_search.py`
+- `framework/scripts/run_exp088_a1_meta_bias_audit.sh`
+- `framework/scripts/build_exp089_joint_a1_bias_a2_exp086.sh`
+
+A1 方法：
+
+- 不重训底层 SIGN 模型，复用 Exp075 的 OOF meta-stack。
+- 在元模型输出之后，对单个类别概率做小幅缩放，例如 `class 8 * 1.03`、`class 8 * 1.05`。
+- 在 5 个 OOF heldout split 上评估：
+  - `mean_gain`
+  - `min_gain`
+  - `mean_changed`
+- 只有当审计结果显示低改动、平均正收益、最差 split 不明显负收益时，才生成 Exp089。
+
+运行命令：
+
+```bash
+cd /home/aliagent/framework
+git pull origin main
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/run_exp088_a1_meta_bias_audit.sh
+```
+
+若 Exp088 结果可接受，再运行：
+
+```bash
+cd /home/aliagent/framework
+CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp089_joint_a1_bias_a2_exp086.sh
+```
+
+判断规则：
+
+- 若 Exp088 最优仍是 `identity`，或 `mean_gain <= 0`：不改 A1，提交优先级回到 Exp086。
+- 若最佳 bias 的 `mean_changed` 很大：不提交，避免 A1 类别分布被整体推偏。
+- 若最佳 bias 有小幅正收益且改动可控：提交 Exp089，因为它同时包含 A1 新后处理和 A2 Exp086。
