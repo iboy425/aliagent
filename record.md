@@ -5606,3 +5606,92 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda bash scripts/build_exp078_a1_exp075_a2_profil
   - Exp069 总体 `top1_changed=6.33%`，A2 线上降到 `0.5017`；
   - Exp078 总体 `top1_changed=1.82%`，且只替换多 split 验证为正收益的画像分群。
 - 推荐提交 Exp078。
+
+线上反馈：
+
+- 提交时间：2026-06-30 16:02:13
+- 总分：`0.6308`
+- A1：`0.7601`
+- A2：`0.5014`
+
+结论：
+
+- A1：Exp075/078 的 A1 meta-stack 正向，`0.7601` 是当前最佳 A1。
+- A2：Exp078 profile gate 失败，低于 Exp066 的 `0.5033`。
+- 重要归因：
+  - Exp077 审计里的 base 是 `Exp044 checkpoint + model_weight=1.0`；
+  - Exp078 正式使用的 base 是 `Exp075 A2.csv`，包含 EB/桶替换；
+  - 审计对象和提交对象不完全一致。
+- 更重要的是：Exp077 属于“同一批验证样本选分群、同一批验证样本评估分群”，存在选择偏差。
+- 对比 Exp066：
+  - Exp075 A2 相比 Exp066：只改 `len=0`，总体 `top1_changed=5.69%`；
+  - Exp078 A2 相比 Exp066：总体 `top1_changed=7.51%`；
+  - A2 线上下降说明这些未充分验证的增量不适合继续叠加。
+
+下一步：
+
+- 生成 Exp079：A1 保留当前最佳，A2 回滚到 Exp066 稳定版。
+- 新增 Exp080：对 profile gate 做 LOSO 留一 split 审计，判断它是否只适合做分析而不适合提交。
+
+### Exp-079：A1 best + A2 Exp066 stable
+
+日期：2026-07-02
+
+目的：
+
+- 保留 Exp078 线上验证有效的 A1：`0.7601`。
+- 撤销 Exp078 线上失败的 A2 profile gate 和未验证 EB 改动。
+- A2 回滚到线上已验证稳定的 Exp066：`0.5033`。
+
+新增文件：
+
+- `framework/scripts/build_exp079_a1_best_a2_exp066_stable.sh`
+
+生成命令：
+
+```bash
+cd /home/aliagent/framework
+bash scripts/build_exp079_a1_best_a2_exp066_stable.sh
+```
+
+生成结果：
+
+- 候选包：`output/exp079_submit_a1_best_a2_exp066_stable/prediction.zip`
+- A1 分布：
+  - `{0: 75, 1: 384, 2: 284, 3: 73, 4: 1206, 5: 48, 6: 65, 7: 147, 8: 428, 9: 41}`
+- A2：完全复用 Exp066。
+- 提交格式：校验通过。
+
+预期：
+
+- A1 接近 `0.7601`。
+- A2 接近 `0.5033`。
+- 总分预期约 `0.6317`，作为新的安全基线。
+
+### Exp-080：A2 profile gate LOSO 审计
+
+日期：2026-07-02
+
+目的：
+
+- 验证 Exp077 profile gate 是否真的有泛化能力。
+- 用两个 split 选择分群，在剩余一个 split 上评估，轮流三次。
+
+新增文件：
+
+- `framework/scripts/run_exp080_a2_profile_gate_loso_audit.sh`
+- `framework/code/a2_profile_gate.py` 新增 `--loso` 参数。
+
+本地 smoke：
+
+- 使用两个小 split、每个最多 150 验证样本。
+- 结果：
+  - `mean_eval_gain=-0.007027`
+  - `min_eval_gain=-0.011205`
+  - `positive_folds=0/2`
+
+初步结论：
+
+- profile gate 在同集审计里看起来有效，但留一评估不稳定。
+- 这与 Exp078 线上 A2 下降一致。
+- 该方法更适合做“诊断哪些桶 alt 有潜力”，不适合直接作为提交策略，除非完整 LOSO 审计转正。

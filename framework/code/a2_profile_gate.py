@@ -282,9 +282,122 @@ def select_groups(args, rows: Sequence[Mapping]) -> Dict:
     }
 
 
+def evaluate_selected_keys(rows: Sequence[Mapping], selected_keys: Sequence[str]) -> Dict:
+    """在给定样本上评估一组已选分群"""
+    selected_key_set = set(selected_keys)
+    eval_rows = []
+    for row in rows:
+        use_alt = any(key in selected_key_set for key in row["keys"])
+        eval_rows.append({
+            "bucket": row["bucket"],
+            "base_ndcg": row["base_ndcg"],
+            "alt_ndcg": row["alt_ndcg"],
+            "gated_ndcg": row["alt_ndcg"] if use_alt else row["base_ndcg"],
+            "use_alt": float(use_alt),
+        })
+
+    def mean(items, key):
+        return float(np.mean([item[key] for item in items])) if items else 0.0
+
+    bucket_summary = {}
+    for bucket in BUCKET_ORDER:
+        items = [row for row in eval_rows if row["bucket"] == bucket]
+        if not items:
+            continue
+        bucket_summary[bucket] = {
+            "samples": len(items),
+            "base_ndcg": mean(items, "base_ndcg"),
+            "alt_ndcg": mean(items, "alt_ndcg"),
+            "gated_ndcg": mean(items, "gated_ndcg"),
+            "gain_vs_base": mean(items, "gated_ndcg") - mean(items, "base_ndcg"),
+            "use_alt_rate": mean(items, "use_alt"),
+        }
+
+    return {
+        "samples": len(eval_rows),
+        "base_ndcg": mean(eval_rows, "base_ndcg"),
+        "alt_ndcg": mean(eval_rows, "alt_ndcg"),
+        "gated_ndcg": mean(eval_rows, "gated_ndcg"),
+        "gain_vs_base": mean(eval_rows, "gated_ndcg") - mean(eval_rows, "base_ndcg"),
+        "gain_vs_alt": mean(eval_rows, "gated_ndcg") - mean(eval_rows, "alt_ndcg"),
+        "use_alt_rate": mean(eval_rows, "use_alt"),
+        "bucket_summary": bucket_summary,
+    }
+
+
+def run_loso_audit(args, rows: Sequence[Mapping], user_cols: Sequence[str], specs: Sequence[Tuple[str, ...]]) -> Dict:
+    """按 split 做留一验证，估计 gate 的真实泛化能力"""
+    split_seeds = sorted({row["split_seed"] for row in rows})
+    folds = []
+    for heldout in split_seeds:
+        train_rows = [row for row in rows if row["split_seed"] != heldout]
+        eval_rows = [row for row in rows if row["split_seed"] == heldout]
+        policy = select_groups(args, train_rows)
+        selected_keys = policy["policy"]["selected_keys"]
+        eval_summary = evaluate_selected_keys(eval_rows, selected_keys)
+        folds.append({
+            "heldout": heldout,
+            "selected_count": len(selected_keys),
+            "train_summary": policy["summary"],
+            "eval_summary": eval_summary,
+            "selected_groups": policy["policy"]["selected_groups"],
+        })
+
+    mean_gain = float(np.mean([fold["eval_summary"]["gain_vs_base"] for fold in folds])) if folds else 0.0
+    min_gain = float(np.min([fold["eval_summary"]["gain_vs_base"] for fold in folds])) if folds else 0.0
+    result = {
+        "mode": "loso",
+        "folds": folds,
+        "summary": {
+            "folds": len(folds),
+            "mean_eval_gain": mean_gain,
+            "min_eval_gain": min_gain,
+            "positive_folds": sum(1 for fold in folds if fold["eval_summary"]["gain_vs_base"] > 0),
+        },
+        "config": {
+            "user_cols": list(user_cols),
+            "specs": [list(spec) for spec in specs],
+            "buckets": parse_csv_list(args.buckets),
+            "base_checkpoint": args.base_checkpoint,
+            "alt_checkpoint": args.alt_checkpoint,
+            "base_model_weight": args.base_model_weight,
+            "alt_model_weight": args.alt_model_weight,
+        },
+    }
+    return result
+
+
 def run_audit(args):
     """审计分群 gate"""
     rows, user_cols, specs = collect_validation_rows(args)
+    if args.loso:
+        result = run_loso_audit(args, rows, user_cols, specs)
+        if args.output_json:
+            os.makedirs(os.path.dirname(args.output_json) or ".", exist_ok=True)
+            with open(args.output_json, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+
+        print("=" * 100)
+        print("A2 画像分群 gate LOSO 审计")
+        print("=" * 100)
+        summary = result["summary"]
+        print(
+            f"mean_eval_gain={summary['mean_eval_gain']:+.6f}\t"
+            f"min_eval_gain={summary['min_eval_gain']:+.6f}\t"
+            f"positive_folds={summary['positive_folds']}/{summary['folds']}"
+        )
+        for fold in result["folds"]:
+            item = fold["eval_summary"]
+            print(
+                f"heldout={fold['heldout']}\tselected={fold['selected_count']}\t"
+                f"base={item['base_ndcg']:.6f}\talt={item['alt_ndcg']:.6f}\t"
+                f"gated={item['gated_ndcg']:.6f}\tgain={item['gain_vs_base']:+.6f}\t"
+                f"use_alt={item['use_alt_rate']:.2%}"
+            )
+        if args.output_json:
+            print(f"\n结果已保存: {args.output_json}")
+        return
+
     result = select_groups(args, rows)
     result["config"] = {
         "user_cols": user_cols,
@@ -451,6 +564,8 @@ def parse_args():
     audit.add_argument("--min_positive_splits", type=int, default=2)
     audit.add_argument("--min_gain", type=float, default=0.01)
     audit.add_argument("--max_groups", type=int, default=20)
+    audit.add_argument("--loso", action="store_true",
+                       help="使用留一split审计分群选择的泛化能力")
     audit.add_argument("--output_json", default="")
     add_fusion_args(audit)
 
