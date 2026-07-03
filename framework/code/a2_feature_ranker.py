@@ -49,6 +49,9 @@ class A2FeatureBundle:
     target2class: Dict[str, int]
     user_cols: List[str]
     user_value_maps: Dict[str, Dict[str, int]]
+    item_cols: List[str]
+    item_value_maps: Dict[str, Dict[str, int]]
+    item_feature_table: List[List[int]]
 
 
 def choose_seq_col(df: pd.DataFrame, seq_col: str) -> str:
@@ -69,6 +72,7 @@ def make_feature_bundle(
     user_df: pd.DataFrame,
     item_df: pd.DataFrame,
     user_cols_arg: str,
+    item_cols_arg: str = "",
 ) -> A2FeatureBundle:
     """根据训练/测试数据建立离散特征映射"""
     all_items = sorted(item_df["iid"].astype(str).unique().tolist())
@@ -91,6 +95,25 @@ def make_feature_bundle(
         values = sorted(user_df[col].astype(str).fillna("__NA__").unique().tolist())
         user_value_maps[col] = {value: idx + 1 for idx, value in enumerate(values)}
 
+    item_cols = parse_item_feature_cols(item_df, item_cols_arg)
+    item_value_maps = {}
+    for col in item_cols:
+        values = sorted(item_df[col].astype(str).fillna("__NA__").unique().tolist())
+        item_value_maps[col] = {value: idx + 1 for idx, value in enumerate(values)}
+
+    item_lookup = item_df.copy()
+    item_lookup["iid"] = item_lookup["iid"].astype(str)
+    item_lookup = item_lookup.set_index("iid")
+    item_feature_table = [[0] * len(item_cols) for _ in range(len(item2idx) + 1)]
+    for iid, idx in item2idx.items():
+        if iid not in item_lookup.index:
+            continue
+        row = item_lookup.loc[iid]
+        item_feature_table[idx] = [
+            item_value_maps[col].get("__NA__" if pd.isna(row[col]) else str(row[col]), 0)
+            for col in item_cols
+        ]
+
     return A2FeatureBundle(
         item2idx=item2idx,
         idx2item=idx2item,
@@ -98,6 +121,9 @@ def make_feature_bundle(
         target2class=target2class,
         user_cols=user_cols,
         user_value_maps=user_value_maps,
+        item_cols=item_cols,
+        item_value_maps=item_value_maps,
+        item_feature_table=item_feature_table,
     )
 
 
@@ -230,13 +256,38 @@ class A2FeatureRanker(nn.Module):
         num_items: int,
         num_targets: int,
         user_cardinalities: Sequence[int],
+        item_feature_cardinalities: Sequence[int] = None,
+        item_feature_table: Sequence[Sequence[int]] = None,
         embedding_dim: int = 128,
         user_embedding_dim: int = 12,
+        item_feature_embedding_dim: int = 8,
         hidden_dim: int = 256,
         dropout: float = 0.2,
     ):
         super().__init__()
+        item_feature_cardinalities = list(item_feature_cardinalities or [])
         self.item_embedding = nn.Embedding(num_items + 1, embedding_dim, padding_idx=0)
+        self.item_feature_embeddings = nn.ModuleList([
+            nn.Embedding(cardinality + 1, item_feature_embedding_dim, padding_idx=0)
+            for cardinality in item_feature_cardinalities
+        ])
+        if item_feature_table is None or not item_feature_cardinalities:
+            self.register_buffer(
+                "item_feature_table",
+                torch.zeros((num_items + 1, 0), dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            table = torch.tensor(item_feature_table, dtype=torch.long)
+            if table.shape[0] != num_items + 1:
+                raise ValueError("item_feature_table行数必须等于num_items+1")
+            self.register_buffer("item_feature_table", table, persistent=False)
+        seq_input_dim = embedding_dim + item_feature_embedding_dim * len(item_feature_cardinalities)
+        self.item_feature_projection = (
+            nn.Linear(seq_input_dim, embedding_dim)
+            if seq_input_dim != embedding_dim
+            else nn.Identity()
+        )
         self.user_embeddings = nn.ModuleList([
             nn.Embedding(cardinality + 1, user_embedding_dim, padding_idx=0)
             for cardinality in user_cardinalities
@@ -272,6 +323,13 @@ class A2FeatureRanker(nn.Module):
     def forward(self, seq: torch.Tensor, user_feats: torch.Tensor, seq_len: torch.Tensor) -> torch.Tensor:
         """前向传播，输出 target 类别 logits"""
         item_emb = self.item_embedding(seq)
+        if self.item_feature_embeddings:
+            feature_ids = self.item_feature_table[seq]
+            feature_parts = [
+                emb(feature_ids[:, :, idx])
+                for idx, emb in enumerate(self.item_feature_embeddings)
+            ]
+            item_emb = torch.relu(self.item_feature_projection(torch.cat([item_emb] + feature_parts, dim=-1)))
         mask = (seq != 0).unsqueeze(-1)
         denom = mask.sum(dim=1).clamp(min=1)
         mean_emb = (item_emb * mask).sum(dim=1) / denom
@@ -331,6 +389,9 @@ def save_checkpoint(path: str, model: nn.Module, bundle: A2FeatureBundle, args, 
                 "target2class": bundle.target2class,
                 "user_cols": bundle.user_cols,
                 "user_value_maps": bundle.user_value_maps,
+                "item_cols": bundle.item_cols,
+                "item_value_maps": bundle.item_value_maps,
+                "item_feature_table": bundle.item_feature_table,
             },
             "args": vars(args),
             "metrics": metrics,
@@ -351,7 +412,7 @@ def train(args):
     seq_col = choose_seq_col(train_df, args.seq_col)
     test_seq_col = choose_seq_col(test_df, args.seq_col)
 
-    bundle = make_feature_bundle(train_df, test_df, user_df, item_df, args.user_cols)
+    bundle = make_feature_bundle(train_df, test_df, user_df, item_df, args.user_cols, args.item_cols)
     user_lookup = user_df.set_index("uid")
     lengths = test_like_lengths(test_df, test_seq_col)
 
@@ -396,12 +457,16 @@ def train(args):
         )
 
     user_cardinalities = [len(bundle.user_value_maps[col]) for col in bundle.user_cols]
+    item_feature_cardinalities = [len(bundle.item_value_maps[col]) for col in bundle.item_cols]
     model = A2FeatureRanker(
         num_items=len(bundle.item2idx),
         num_targets=len(bundle.target_items),
         user_cardinalities=user_cardinalities,
+        item_feature_cardinalities=item_feature_cardinalities,
+        item_feature_table=bundle.item_feature_table,
         embedding_dim=args.embedding_dim,
         user_embedding_dim=args.user_embedding_dim,
+        item_feature_embedding_dim=args.item_feature_embedding_dim,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
     ).to(device)
@@ -417,7 +482,10 @@ def train(args):
 
     print("=" * 100)
     print("A2用户画像序列排序模型训练")
-    print(f"device={device}, seq_col={seq_col}, targets={len(bundle.target_items)}, user_cols={bundle.user_cols}")
+    print(
+        f"device={device}, seq_col={seq_col}, targets={len(bundle.target_items)}, "
+        f"user_cols={bundle.user_cols}, item_cols={bundle.item_cols}"
+    )
     val_size = 0 if val_dataset is None else len(val_dataset)
     print(f"train={len(trn_dataset)}, val={val_size}, test_like_val={args.test_like_val}, train_all={args.train_all}")
     print("=" * 100)
@@ -495,6 +563,9 @@ def load_bundle(raw: Dict) -> A2FeatureBundle:
         target2class=raw["target2class"],
         user_cols=raw["user_cols"],
         user_value_maps=raw["user_value_maps"],
+        item_cols=raw.get("item_cols", []),
+        item_value_maps=raw.get("item_value_maps", {}),
+        item_feature_table=raw.get("item_feature_table", [[0] * 0 for _ in range(len(raw["item2idx"]) + 1)]),
     )
 
 
@@ -541,12 +612,16 @@ def load_ranker(checkpoint_path: str, device: torch.device) -> Tuple[A2FeatureRa
     bundle = load_bundle(checkpoint["bundle"])
     model_args = checkpoint["args"]
     user_cardinalities = [len(bundle.user_value_maps[col]) for col in bundle.user_cols]
+    item_feature_cardinalities = [len(bundle.item_value_maps[col]) for col in bundle.item_cols]
     model = A2FeatureRanker(
         num_items=len(bundle.item2idx),
         num_targets=len(bundle.target_items),
         user_cardinalities=user_cardinalities,
+        item_feature_cardinalities=item_feature_cardinalities,
+        item_feature_table=bundle.item_feature_table,
         embedding_dim=model_args.get("embedding_dim", 128),
         user_embedding_dim=model_args.get("user_embedding_dim", 12),
+        item_feature_embedding_dim=model_args.get("item_feature_embedding_dim", 8),
         hidden_dim=model_args.get("hidden_dim", 256),
         dropout=model_args.get("dropout", 0.2),
     )
@@ -584,6 +659,8 @@ def load_rankers(checkpoint_arg: str, device: torch.device) -> Tuple[List[A2Feat
                 raise ValueError(f"checkpoint user_cols不一致: {path}")
             if bundle.item2idx != reference_bundle.item2idx:
                 raise ValueError(f"checkpoint item映射不一致: {path}")
+            if bundle.item_cols != reference_bundle.item_cols:
+                raise ValueError(f"checkpoint item_cols不一致: {path}")
         models.append(model)
     return models, reference_bundle
 
@@ -952,11 +1029,14 @@ def build_parser():
     train_parser = subparsers.add_parser("train", parents=[common])
     train_parser.add_argument("--output_dir", type=str, required=True)
     train_parser.add_argument("--user_cols", type=str, default="auto")
+    train_parser.add_argument("--item_cols", type=str, default="",
+                              help="用于序列item侧embedding的item.csv特征列，auto表示使用除iid外全部列")
     train_parser.add_argument("--epochs", type=int, default=80)
     train_parser.add_argument("--val_ratio", type=float, default=0.1)
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--embedding_dim", type=int, default=128)
     train_parser.add_argument("--user_embedding_dim", type=int, default=12)
+    train_parser.add_argument("--item_feature_embedding_dim", type=int, default=8)
     train_parser.add_argument("--hidden_dim", type=int, default=256)
     train_parser.add_argument("--dropout", type=float, default=0.2)
     train_parser.add_argument("--lr", type=float, default=1e-3)

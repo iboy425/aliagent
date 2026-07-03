@@ -6286,3 +6286,56 @@ GPU 审计反馈：
 
 - 全画像组合 EB 低于旧 prefix EB，暂不保留代码。
 - 已删除临时实现，避免仓库保留无效分支。
+
+### Exp-099：A2 item.csv 特征嵌入模型
+
+日期：2026-07-03
+
+背景：
+
+- Exp095 的 item-feature 规则后处理几乎没有收益。
+- 但官方建议里更核心的是“将 item.csv 特征嵌入并拼接到 item embedding”。
+- 当前 `a2_feature_ranker.py` 旧结构只使用：
+  - item id embedding；
+  - user.csv 画像 embedding；
+  - 历史长度 embedding。
+- 它没有把 `item.csv` 的 `i_cat_01/i_cat_02/i_cat_03/i_bucket_01` 作为模型输入。
+
+代码调整：
+
+- `framework/code/a2_feature_ranker.py`
+  - `A2FeatureBundle` 新增：
+    - `item_cols`
+    - `item_value_maps`
+    - `item_feature_table`
+  - `A2FeatureRanker` 新增：
+    - `item_feature_embeddings`
+    - `item_feature_projection`
+  - `forward()` 中根据 item 序列查表得到 item 特征 embedding，与 item id embedding 拼接后投影。
+  - 新增训练参数：
+    - `--item_cols`
+    - `--item_feature_embedding_dim`
+  - 默认 `--item_cols ""`，旧 checkpoint 可正常加载，不破坏 Exp045/Exp090/Exp096。
+- 新增 `framework/scripts/run_exp099_a2_item_feature_model_multiseed.sh`
+  - 多 seed 训练 item-feature ranker。
+  - 搜索模型融合权重。
+  - 生成 A2 alt。
+  - 默认用 A1 Exp096 + A2 Exp090 底座，保护 Top1 后只在中长历史桶接入新 A2。
+- 新增 `framework/scripts/run_exp100_a2_item_model_protected_audit.sh`
+  - 对 Exp099 alt 做多 split 保护式融合审计。
+
+本地检查：
+
+- `python3 -m py_compile framework/code/a2_feature_ranker.py` 通过。
+- 旧 checkpoint `output/exp044_a2_feature_ranker_seed42/best_model.pt` 可正常加载。
+- 缩小版 smoke：
+  - `SEEDS=42`
+  - `EPOCHS=1`
+  - 小模型维度
+  - 训练、融合评估、A2 生成、prediction.zip 校验全部通过。
+
+下一步：
+
+- 需要在 GPU 上运行正式 Exp099。
+- 训练完成后先运行 Exp100 审计。
+- 只有 Exp100 显示 A2 稳定正收益时，才考虑用 A1 Exp096 + A2 Exp099 提交。
