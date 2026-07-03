@@ -6339,3 +6339,80 @@ GPU 审计反馈：
 - 需要在 GPU 上运行正式 Exp099。
 - 训练完成后先运行 Exp100 审计。
 - 只有 Exp100 显示 A2 稳定正收益时，才考虑用 A1 Exp096 + A2 Exp099 提交。
+
+GPU 反馈：
+
+- 单 seed：
+  - seed777: `ndcg=0.499480`
+  - seed2024: `ndcg=0.493432`
+  - seed42: `ndcg=0.485862`
+- 多 seed 融合最佳：
+  - `model_weight=15.0`
+  - `weighted_NDCG=0.511647`
+- 对比：
+  - 旧 Exp045 多 seed 融合 `weighted_NDCG=0.514245`
+  - Exp099 低于 Exp045，说明 item.csv 特征嵌入当前均值池化 ranker 后没有带来收益。
+
+Exp100 保护融合审计：
+
+- `keep=2, buckets=len=2-3+len=4-10+len>10`
+  - `mean_gain=+0.000836`
+  - `min_gain=-0.002208`
+- 最稳正收益很小：
+  - `keep=3, buckets=len=4-10+len>10`
+  - `mean_gain=+0.000263`
+  - `min_gain=+0.000010`
+
+结论：
+
+- 不提交 Exp099。
+- A2 item-feature 模型路线暂时停止，回到线上有效的 Exp090/Exp086 稳定底座。
+
+### Exp-101：A1 Exp096 + A2 len=2-3 严格分群保护融合
+
+日期：2026-07-03
+
+背景：
+
+- 当前线上最好稳定包是 Exp090：
+  - 总分 `0.6318`
+  - A1 `0.7601`
+  - A2 `0.5035`
+- Exp096 在 A1 无泄漏多 split 审计中比 Exp090 的 A1 后处理更稳：
+  - `mean_gain=+0.003470`
+  - `min_gain=+0.000913`
+- A2 的 Exp086/090 已经启用中长历史严格分群，并保护 Top1。
+- Exp081 严格策略中还有两个 `len=2-3` 分群离线为正，但 Exp090 没启用。
+
+方法：
+
+- A1：
+  - 直接使用 `output/exp096_submit_a1_label_neighbor_meta_a2_stable/A1.csv`
+- A2：
+  - base 使用 `output/exp090_submit_a1_safe_bias_a2_exp086/A2.csv`
+  - alt 使用 `output/exp045_a2_feature_multiseed/A2.csv`
+  - policy 使用 `output/exp081_a2_profile_gate_strict_audit/policy.json`
+  - 只启用 `len=2-3`
+  - `keep_topn=1`，完全保护 base Top1，只改第 2-10 位。
+
+漂移：
+
+- 相对 Exp090 A2：
+  - 总体 `changed=5.7300%`
+  - `top1_changed=0.0000%`
+  - `top10_overlap=99.4860%`
+- 分桶：
+  - `len=2-3`: `changed=12.8073%`, `top1_changed=0.0000%`
+  - 其他桶完全不变。
+
+候选包：
+
+- `framework/output/exp101_submit_a1_exp096_a2_len23_strict_keep_top1/prediction.zip`
+
+判断：
+
+- 这是比 Exp099 更合理的下一次提交候选。
+- 预期：
+  - A1 相比 Exp090 有小幅正收益；
+  - A2 有机会在 Exp090 `0.5035` 上继续小幅提升；
+  - 风险主要来自 `len=2-3` 离线分群是否能线上转化，但 Top1 已完全保护，风险低于 Exp078/Exp093。
