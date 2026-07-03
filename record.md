@@ -6111,3 +6111,50 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda RETRAIN=1 bash scripts/build_exp094_a1_best_a
 - 这是 A2 的“训练数据利用率”提升，不是线上分数反推。
 - 如果 Exp094 A2 提升，后续继续围绕全量重训搜索 seed/epoch/model_weight。
 - 如果 Exp094 A2 下降，说明 Exp045 的收益主要来自验证切分或模型偶然性，A2 应回到 Exp086，并优先做冷启动 empirical-Bayes 和有序 suffix 的多 split 审计。
+
+线上反馈：
+
+- 提交时间：2026-07-03 15:33:12
+- 总分：`0.6316`
+- A1：`0.7601`
+- A2：`0.5031`
+
+结论：
+
+- Exp094 相比 Exp090 的 A1 持平，但 A2 从 `0.5035` 降到 `0.5031`。
+- 全量重训 feature ranker 没有带来线上收益，说明当前 A2 缺口不是简单“多用10%训练样本”。
+- 后续 A2 回到 Exp086/Exp090 的线上稳定底座，优先尝试：
+  - 更贴合测试分布的冷启动/短历史处理；
+  - item.csv 物品侧特征转移；
+  - 严格分群 gate 和 Top1 保护，避免整表替换。
+
+### Exp-095：A1 稳定底座 + A2 item.csv 物品侧特征转移 gate
+
+日期：2026-07-03
+
+背景：
+
+- 官方提分资料明确提到 A2 可以利用 `item.csv` 物品特征。
+- 仓库中 `rec_heuristics.py` 已有物品侧特征转移函数，但主力 `a2_feature_ranker.py eval_fusion/predict_fusion` 之前没有接入，导致 Exp045/Exp086 主线没有真正使用这类信号。
+
+代码调整：
+
+- `framework/code/a2_feature_ranker.py`
+  - 接入 `build_item_feature_transition_stats()`、`get_item_feature_counters()`、`parse_item_feature_cols()`。
+  - `build_rule_context()` 新增物品特征转移统计。
+  - `rank_with_fusion()` 新增 `item_feature_counters` 和 `item_feature_weight`。
+  - `eval_fusion` 支持 `--item_feature_weights` 一次性搜索多个物品特征权重，避免重复模型推理。
+- `framework/code/a2_profile_gate.py`
+  - 同步新增 item-feature 参数，保证 gate 审计时 base/alt 使用同一套融合参数。
+- `framework/code/a2_protected_blend.py`
+  - 同步新增 item-feature 参数，保证保护式融合审计接口完整。
+- 新增 `framework/scripts/build_exp095_a1_best_a2_item_feature_gate.sh`
+  - A1 复用 Exp090 稳定结果。
+  - A2 先生成 item-feature alt，再用 Exp086 A2 作为 base 做严格画像分群 gate。
+  - 默认只在 `len=4-10,len>10` 启用替换，并保护 base Top1。
+
+本地检查：
+
+- `python3 -m py_compile framework/code/a2_feature_ranker.py framework/code/a2_profile_gate.py framework/code/a2_protected_blend.py` 通过。
+- `bash -n framework/scripts/build_exp095_a1_best_a2_item_feature_gate.sh` 通过。
+- 小样本 CPU smoke 通过，但 `item_feature_weight=0.01` 在 1% 验证样本上略低于 0，说明该方向必须等完整 GPU 审计结果再决定是否提交。

@@ -291,6 +291,10 @@ def add_fusion_args(parser):
     parser.add_argument("--user_combo_sizes", default="3,2,1")
     parser.add_argument("--user_combo_mode", default="prefix", choices=["prefix", "all"])
     parser.add_argument("--user_combo_min_count", type=int, default=5)
+    parser.add_argument("--item_feature_cols", default="auto")
+    parser.add_argument("--item_feature_weight", type=float, default=0.0)
+    parser.add_argument("--item_feature_recent_n", type=int, default=10)
+    parser.add_argument("--item_feature_min_count", type=int, default=20)
 
 
 def parse_args():

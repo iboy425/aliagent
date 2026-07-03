@@ -22,10 +22,13 @@ from rec_heuristics import (
     build_cooccur_score_stats,
     build_cooccur_stats,
     build_global_popularity,
+    build_item_feature_transition_stats,
     build_user_combo_profile_stats,
     build_user_profile_stats,
+    get_item_feature_counters,
     get_user_combo_profile_counters,
     get_user_profile_counters,
+    parse_item_feature_cols,
     parse_item_counts,
     parse_seq,
     rank_items,
@@ -666,6 +669,18 @@ def build_rule_context(args, train_df: pd.DataFrame, user_df: pd.DataFrame, item
         combo_mode=args.user_combo_mode,
         min_count=args.user_combo_min_count,
     )
+    item_feature_cols = parse_item_feature_cols(item_df, args.item_feature_cols)
+    item_feature_stats = None
+    item_lookup = item_df.set_index("iid")
+    if args.item_feature_weight > 0 and item_feature_cols:
+        item_feature_stats, item_lookup = build_item_feature_transition_stats(
+            train_df=train_df,
+            item_df=item_df,
+            seq_col=seq_col,
+            feature_cols=item_feature_cols,
+            recent_n=args.item_feature_recent_n,
+            min_count=args.item_feature_min_count,
+        )
 
     return {
         "candidate_items": candidate_items,
@@ -676,6 +691,9 @@ def build_rule_context(args, train_df: pd.DataFrame, user_df: pd.DataFrame, item
         "user_lookup": user_lookup,
         "user_profile_stats": user_profile_stats,
         "user_combo_stats": user_combo_stats,
+        "item_feature_cols": item_feature_cols,
+        "item_feature_stats": item_feature_stats,
+        "item_lookup": item_lookup,
     }
 
 
@@ -704,6 +722,14 @@ def rank_with_fusion(
             user_profile_stats=rule_context["user_profile_stats"],
             user_cols=rule_context["user_cols"],
         )
+        item_feature_counters = get_item_feature_counters(
+            seq=seq,
+            item_lookup=rule_context["item_lookup"],
+            item_feature_stats=rule_context["item_feature_stats"],
+            feature_cols=rule_context["item_feature_cols"],
+            recent_n=args.item_feature_recent_n,
+            min_count=args.item_feature_min_count,
+        )
         preds.append(rank_items(
             seq=seq,
             candidate_items=rule_context["candidate_items"],
@@ -716,6 +742,7 @@ def rank_with_fusion(
             model_scores=score_map,
             user_profile_counters=user_counters,
             user_combo_counters=user_combo_counters,
+            item_feature_counters=item_feature_counters,
             history_counts=parse_item_counts(row.get("item_seq_counts")),
             model_weight=model_weight,
             pop_weight=args.pop_weight,
@@ -724,6 +751,7 @@ def rank_with_fusion(
             cooccur_score_mode=rule_context["cooccur_score_mode"],
             user_weight=args.user_weight,
             user_combo_weight=args.user_combo_weight,
+            item_feature_weight=args.item_feature_weight,
             history_count_weight=args.history_count_weight,
             pop_penalty_weight=args.pop_penalty_weight,
         ))
@@ -807,7 +835,16 @@ def eval_fusion(args):
         val_df = apply_fixed_test_like_truncation(val_df, lengths, seq_col, args.seed)
 
     user_lookup = user_df.set_index("uid")
+    item_feature_weights = (
+        parse_float_list(args.item_feature_weights)
+        if getattr(args, "item_feature_weights", "")
+        else [args.item_feature_weight]
+    )
+    original_item_feature_weight = args.item_feature_weight
+    if max(item_feature_weights) > 0:
+        args.item_feature_weight = max(item_feature_weights)
     rule_context = build_rule_context(args, fit_df, user_df, item_df, seq_col)
+    args.item_feature_weight = original_item_feature_weight
     model_scores = score_dataframe_with_models(
         val_df,
         models,
@@ -822,14 +859,28 @@ def eval_fusion(args):
     bucket_weights = compute_bucket_weights(test_df, test_seq_col)
 
     results = []
-    for model_weight in parse_float_list(args.model_weights):
-        preds = rank_with_fusion(val_df, model_scores, seq_col, rule_context, args, model_weight)
-        metrics = evaluate_prediction_lists(preds, targets, val_df, seq_col, args.topk, bucket_weights)
-        result = {
-            "model_weight": model_weight,
-            **metrics,
-        }
-        results.append(result)
+    for item_feature_weight in item_feature_weights:
+        args.item_feature_weight = item_feature_weight
+        for model_weight in parse_float_list(args.model_weights):
+            preds = rank_with_fusion(val_df, model_scores, seq_col, rule_context, args, model_weight)
+            metrics = evaluate_prediction_lists(preds, targets, val_df, seq_col, args.topk, bucket_weights)
+            result = {
+                "model_weight": model_weight,
+                "recent_n": args.recent_n,
+                "cooccur_formula": args.cooccur_formula,
+                "cooccur_weight": args.cooccur_weight,
+                "cooccur_decay": args.cooccur_decay,
+                "user_weight": args.user_weight,
+                "user_combo_weight": args.user_combo_weight,
+                "user_combo_sizes": args.user_combo_sizes,
+                "item_feature_cols": args.item_feature_cols,
+                "item_feature_weight": item_feature_weight,
+                "item_feature_recent_n": args.item_feature_recent_n,
+                "item_feature_min_count": args.item_feature_min_count,
+                **metrics,
+            }
+            results.append(result)
+    args.item_feature_weight = original_item_feature_weight
 
     results.sort(key=lambda item: item[args.sort_metric], reverse=True)
     print("=" * 100)
@@ -838,6 +889,7 @@ def eval_fusion(args):
     for item in results[:20]:
         print(
             f"model_weight={item['model_weight']:.4f}\t"
+            f"item_feature_weight={item['item_feature_weight']:.4f}\t"
             f"NDCG@{args.topk}={item['ndcg']:.6f}\t"
             f"weighted_NDCG={item['weighted_ndcg']:.6f}\t"
             f"Hit={item['hit']:.6f}\tMRR={item['mrr']:.6f}"
@@ -945,6 +997,15 @@ def build_parser():
     fusion_common.add_argument("--user_combo_sizes", type=str, default="3,2,1")
     fusion_common.add_argument("--user_combo_mode", type=str, default="prefix", choices=["prefix", "all"])
     fusion_common.add_argument("--user_combo_min_count", type=int, default=5)
+    fusion_common.add_argument(
+        "--item_feature_cols",
+        type=str,
+        default="auto",
+        help="用于物品侧转移统计的item.csv特征列，auto表示使用除iid外全部列，空字符串表示关闭",
+    )
+    fusion_common.add_argument("--item_feature_weight", type=float, default=0.0)
+    fusion_common.add_argument("--item_feature_recent_n", type=int, default=10)
+    fusion_common.add_argument("--item_feature_min_count", type=int, default=20)
 
     eval_fusion_parser = subparsers.add_parser("eval_fusion", parents=[common, fusion_common])
     eval_fusion_parser.add_argument(
@@ -959,6 +1020,12 @@ def build_parser():
         default="weighted_ndcg",
         choices=["ndcg", "weighted_ndcg"],
         help="选择最佳模型融合权重时使用的指标",
+    )
+    eval_fusion_parser.add_argument(
+        "--item_feature_weights",
+        type=str,
+        default="",
+        help="逗号分隔的物品特征转移融合权重搜索列表；为空时使用--item_feature_weight",
     )
     eval_fusion_parser.add_argument("--output_json", type=str, default="")
 
