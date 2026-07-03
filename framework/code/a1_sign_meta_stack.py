@@ -62,6 +62,61 @@ def graph_struct_features(data: Dict) -> np.ndarray:
     return ((features - mean) / np.maximum(std, 1e-6)).astype(np.float32)
 
 
+def _row_normalize_features(features: np.ndarray) -> np.ndarray:
+    """对元特征做列标准化"""
+    mean = features.mean(axis=0, keepdims=True)
+    std = features.std(axis=0, keepdims=True)
+    return ((features - mean) / np.maximum(std, 1e-6)).astype(np.float32)
+
+
+def label_neighbor_meta_features(data: Dict, label_idx: np.ndarray, hops: int = 2) -> np.ndarray:
+    """构造无泄漏邻居标签统计元特征
+
+    这里的 `label_idx` 必须是当前 split 的拟合集节点。验证节点标签不参与
+    统计，因此可以用于 OOF 审计；正式测试时则使用全部训练标签。
+    """
+    labels = data["labels"].astype(np.int64)
+    num_nodes = int(data.get("num_nodes", data["adj"].shape[0]))
+    num_classes = int(labels[labels >= 0].max()) + 1
+    label_idx = np.asarray(label_idx, dtype=np.int64)
+
+    seed = np.zeros((num_nodes, num_classes), dtype=np.float32)
+    valid_label_idx = label_idx[labels[label_idx] >= 0]
+    seed[valid_label_idx, labels[valid_label_idx]] = 1.0
+
+    adj = data["adj"].tocsr().astype(np.float32)
+    modes = {
+        "directed": (adj > 0).astype(np.float32).tocsr(),
+        "reverse": (adj.T > 0).astype(np.float32).tocsr(),
+        "undirected": ((adj + adj.T) > 0).astype(np.float32).tocsr(),
+    }
+
+    blocks = []
+    for mat in modes.values():
+        cur = seed
+        for _ in range(max(int(hops), 0)):
+            cur = mat @ cur
+            total = cur.sum(axis=1, keepdims=True).astype(np.float32)
+            prob = cur / np.maximum(total, 1e-6)
+            top = prob.max(axis=1, keepdims=True)
+            sorted_prob = np.sort(prob, axis=1)
+            margin = sorted_prob[:, -1:] - sorted_prob[:, -2:-1]
+            entropy = -np.sum(
+                np.clip(prob, 1e-9, 1.0) * np.log(np.clip(prob, 1e-9, 1.0)),
+                axis=1,
+                keepdims=True,
+            )
+            blocks.extend([
+                prob.astype(np.float32),
+                np.log1p(total).astype(np.float32),
+                top.astype(np.float32),
+                margin.astype(np.float32),
+                entropy.astype(np.float32),
+                (total <= 0).astype(np.float32),
+            ])
+    return _row_normalize_features(np.concatenate(blocks, axis=1))
+
+
 def source_meta_features(source_probs: Mapping[str, np.ndarray]) -> np.ndarray:
     """把多个 source 概率转成元特征"""
     names = sorted(source_probs.keys())
@@ -80,6 +135,18 @@ def source_meta_features(source_probs: Mapping[str, np.ndarray]) -> np.ndarray:
     mean_probs = stack.mean(axis=0)
     std_probs = stack.std(axis=0)
     blocks.extend([mean_probs, std_probs])
+    return np.concatenate(blocks, axis=1).astype(np.float32)
+
+
+def build_meta_matrix(
+    source_probs: Mapping[str, np.ndarray],
+    struct: np.ndarray,
+    label_meta: np.ndarray = None,
+) -> np.ndarray:
+    """合并专家概率、结构特征和可选邻居标签统计特征"""
+    blocks = [source_meta_features(source_probs), struct]
+    if label_meta is not None:
+        blocks.append(label_meta)
     return np.concatenate(blocks, axis=1).astype(np.float32)
 
 
@@ -116,7 +183,12 @@ def build_dataset_for_splits(data: Dict, args, device: torch.device):
         print("=" * 100)
         fit_idx, val_idx = split_indices(data, split_seed, args.val_ratio, args.stratified_split)
         source_probs = load_split_sources(data, sources, split_seed, fit_idx, device)
-        meta = np.concatenate([source_meta_features(source_probs), struct], axis=1)
+        label_meta = (
+            label_neighbor_meta_features(data, fit_idx, args.label_neighbor_hops)
+            if args.use_label_neighbor_meta
+            else None
+        )
+        meta = build_meta_matrix(source_probs, struct, label_meta)
         rows[str(split_seed)] = {
             "fit_idx": fit_idx,
             "val_idx": val_idx,
@@ -272,7 +344,12 @@ def run_infer(args):
     source_paths = parse_infer_sources(args.sources)
     source_probs = average_fulltrain_sources(data, source_paths, device)
     struct = graph_struct_features(data)
-    meta = np.concatenate([source_meta_features(source_probs), struct], axis=1)
+    label_meta = (
+        label_neighbor_meta_features(data, data["train_idx"], args.label_neighbor_hops)
+        if args.use_label_neighbor_meta
+        else None
+    )
+    meta = build_meta_matrix(source_probs, struct, label_meta)
 
     if args.oof_sources:
         print("=" * 100)
@@ -284,7 +361,12 @@ def run_infer(args):
         for split_seed in parse_int_list(args.split_seeds):
             fit_idx, val_idx = split_indices(data, split_seed, args.val_ratio, args.stratified_split)
             split_probs = load_split_sources(data, oof_sources, split_seed, fit_idx, device)
-            split_meta = np.concatenate([source_meta_features(split_probs), struct], axis=1)
+            split_label_meta = (
+                label_neighbor_meta_features(data, fit_idx, args.label_neighbor_hops)
+                if args.use_label_neighbor_meta
+                else None
+            )
+            split_meta = build_meta_matrix(split_probs, struct, split_label_meta)
             oof_rows.append(split_meta[val_idx])
             oof_labels.append(labels[val_idx])
         train_x = np.concatenate(oof_rows, axis=0)
@@ -353,6 +435,10 @@ def parse_args():
     audit.add_argument("--class_weights", default="none,balanced")
     audit.add_argument("--thresholds", default="0,0.4,0.5,0.6,0.7,0.8",
                        help="元模型覆盖base所需置信度；0表示不回退")
+    audit.add_argument("--use_label_neighbor_meta", action="store_true",
+                       help="为二层元模型加入无泄漏邻居标签统计特征")
+    audit.add_argument("--label_neighbor_hops", type=int, default=2,
+                       help="邻居标签统计传播跳数")
 
     infer = sub.add_parser("infer")
     infer.add_argument("--data_path", required=True)
@@ -364,6 +450,10 @@ def parse_args():
     infer.add_argument("--val_ratio", type=float, default=0.1)
     infer.add_argument("--stratified_split", action="store_true")
     infer.add_argument("--device", default=None)
+    infer.add_argument("--use_label_neighbor_meta", action="store_true",
+                       help="为二层元模型加入无泄漏邻居标签统计特征")
+    infer.add_argument("--label_neighbor_hops", type=int, default=2,
+                       help="邻居标签统计传播跳数")
     infer.add_argument("--output_path", required=True)
     infer.add_argument("--output_json", default="")
     return parser.parse_args()

@@ -6158,3 +6158,131 @@ CUDA_VISIBLE_DEVICES=0 DEVICE=cuda RETRAIN=1 bash scripts/build_exp094_a1_best_a
 - `python3 -m py_compile framework/code/a2_feature_ranker.py framework/code/a2_profile_gate.py framework/code/a2_protected_blend.py` 通过。
 - `bash -n framework/scripts/build_exp095_a1_best_a2_item_feature_gate.sh` 通过。
 - 小样本 CPU smoke 通过，但 `item_feature_weight=0.01` 在 1% 验证样本上略低于 0，说明该方向必须等完整 GPU 审计结果再决定是否提交。
+
+GPU 审计反馈：
+
+- item-feature 融合最佳：
+  - `model_weight=30.0`
+  - `item_feature_weight=0.02`
+  - `weighted_NDCG=0.515763`
+- 与不使用 item-feature 的最佳结果相比：
+  - `best_no_item_feature_weighted_ndcg=0.515719`
+  - 增益仅 `+0.000044`
+- 严格画像 gate：
+  - `base=0.579209`
+  - `alt=0.585810`
+  - `gated=0.582360`
+  - `gain=+0.003152`
+  - 预测阶段只改 `3.43%` 用户，Top1 不变。
+
+结论：
+
+- Exp095 不建议提交。
+- item.csv 特征转移本身几乎没有额外增益，gate 审计也弱于 Exp081。
+- 该方向暂时停止，除非后续发现更强的 item 侧建模方式。
+
+### Exp-096：A1 邻居标签统计元特征 + A2 稳定底座
+
+日期：2026-07-03
+
+背景：
+
+- Exp075 的 A1 meta-stack 只使用专家概率、置信度、分歧度和简单度数特征。
+- A1 是图节点分类，节点周围训练标签的数量、纯度、方向性对预测可靠性很重要。
+- 新增无泄漏邻居标签统计特征：
+  - 审计 split 中只使用 fit_idx 标签，不使用验证标签；
+  - 正式推理中使用全部训练标签；
+  - 统计 directed / reverse / undirected 三种方向下 1-2 跳邻居标签分布、覆盖度、top概率、margin、entropy。
+
+代码调整：
+
+- `framework/code/a1_sign_meta_stack.py`
+  - 新增 `label_neighbor_meta_features()`。
+  - 新增 `build_meta_matrix()` 统一拼接元特征。
+  - `audit/infer` 增加：
+    - `--use_label_neighbor_meta`
+    - `--label_neighbor_hops`
+- 新增 `framework/scripts/build_exp096_a1_label_neighbor_meta_a2_stable.sh`
+  - A1 使用新增邻居标签元特征 meta-stack。
+  - A2 默认复用 Exp090/Exp086 稳定版本。
+
+本地完整审计：
+
+- 命令核心参数：
+  - `split_seeds=42,777,2024,2026,3407`
+  - `C=0.002,0.005,0.01,0.02`
+  - `threshold=0.2,0.3,0.4,0.5`
+  - `--use_label_neighbor_meta --label_neighbor_hops 2`
+- 最佳结果：
+  - `C=0.02`
+  - `threshold=0.5`
+  - `mean_meta=0.767854`
+  - `mean_base=0.764384`
+  - `mean_gain=+0.003470`
+  - `min_gain=+0.000913`
+  - `mean_changed=0.6758%`
+
+候选包：
+
+- `framework/output/exp096_submit_a1_label_neighbor_meta_a2_stable/prediction.zip`
+
+候选特征：
+
+- A1 类别分布：
+  - `{0:75, 1:386, 2:283, 3:72, 4:1206, 5:47, 6:74, 7:148, 8:416, 9:44}`
+- A2 复用 Exp090 稳定结果。
+
+判断：
+
+- Exp096 是目前 A1 上比 Exp075/Exp090 更稳的正向候选。
+- 预期线上收益主要来自 A1，A2 持平。
+- 如果需要稳健提交，可优先提交 Exp096；如果必须等待 A2 大幅候选，则先保留。
+
+### Exp-097：A2 多 seed alt `model_weight=30` 保护式融合审计
+
+日期：2026-07-03
+
+背景：
+
+- Exp095 离线发现多 seed alt 的最佳 `model_weight` 从旧的 `3.0` 提高到 `30.0`。
+- 直接整表替换风险太高，因此只做保护 TopN 的分桶融合审计。
+
+审计结果：
+
+- 三个 split：
+  - `split=42`: base `0.497053`, alt `0.515719`
+  - `split=777`: base `0.522858`, alt `0.517533`
+  - `split=2024`: base `0.519483`, alt `0.521883`
+- Top 方案：
+  - `keep=1`, `buckets=len=2-3+len=4-10+len>10`
+  - `mean_gain=+0.002254`
+  - `min_gain=-0.003029`
+- 稳定正收益方案：
+  - `keep=1`, `buckets=len=4-10+len>10`
+  - `mean_gain=+0.000853`
+  - `min_gain=+0.000134`
+
+结论：
+
+- 包含 `len=2-3` 的方案仍有负 split，不适合提交。
+- 稳定方案收益过小，无法支撑一次线上提交。
+- A2 暂时继续保留 Exp090/Exp086 稳定底座。
+
+### Exp-098：A2 全画像组合冷启动 EB 试验
+
+日期：2026-07-03
+
+背景：
+
+- 旧版冷启动 EB 只使用用户画像前缀。
+- 尝试枚举任意单列/双列画像组合，并用经验贝叶斯缩减控制过拟合。
+
+结果：
+
+- 小网格 smoke 最佳 NDCG 约 `0.342`。
+- 旧 prefix EB 在确认集上约 `0.35-0.36+`。
+
+结论：
+
+- 全画像组合 EB 低于旧 prefix EB，暂不保留代码。
+- 已删除临时实现，避免仓库保留无效分支。
