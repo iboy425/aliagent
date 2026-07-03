@@ -263,8 +263,10 @@ class A2FeatureRanker(nn.Module):
         item_feature_embedding_dim: int = 8,
         hidden_dim: int = 256,
         dropout: float = 0.2,
+        bucket_heads: bool = False,
     ):
         super().__init__()
+        self.bucket_heads = bool(bucket_heads)
         item_feature_cardinalities = list(item_feature_cardinalities or [])
         self.item_embedding = nn.Embedding(num_items + 1, embedding_dim, padding_idx=0)
         self.item_feature_embeddings = nn.ModuleList([
@@ -295,15 +297,33 @@ class A2FeatureRanker(nn.Module):
         self.length_embedding = nn.Embedding(8, user_embedding_dim)
 
         input_dim = embedding_dim * 2 + user_embedding_dim * len(user_cardinalities) + user_embedding_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_targets),
-        )
+        if self.bucket_heads:
+            # 测试集历史长度分布和训练集原始分布差异很大。
+            # 共享输出头会让冷启动、短历史、长历史互相干扰；桶专用 head
+            # 让每个长度场景学习自己的 target 先验和决策边界。
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            self.output_heads = nn.ModuleList([
+                nn.Linear(hidden_dim, num_targets)
+                for _ in range(8)
+            ])
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, num_targets),
+            )
+            self.output_heads = None
 
         nn.init.xavier_uniform_(self.item_embedding.weight)
 
@@ -341,9 +361,19 @@ class A2FeatureRanker(nn.Module):
             user_parts.append(emb(user_feats[:, i]))
         user_repr = torch.cat(user_parts, dim=-1) if user_parts else mean_emb.new_zeros((seq.size(0), 0))
 
-        len_repr = self.length_embedding(self.length_bucket(seq_len))
+        bucket = self.length_bucket(seq_len)
+        len_repr = self.length_embedding(bucket)
         features = torch.cat([mean_emb, last_emb, user_repr, len_repr], dim=-1)
-        return self.mlp(features)
+        hidden = self.mlp(features)
+        if not self.bucket_heads:
+            return hidden
+
+        logits = hidden.new_empty((hidden.size(0), self.output_heads[0].out_features))
+        for bucket_id, head in enumerate(self.output_heads):
+            mask = bucket == bucket_id
+            if torch.any(mask):
+                logits[mask] = head(hidden[mask])
+        return logits
 
 
 def split_train_val(df: pd.DataFrame, val_ratio: float, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -469,6 +499,7 @@ def train(args):
         item_feature_embedding_dim=args.item_feature_embedding_dim,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
+        bucket_heads=args.bucket_heads,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -624,6 +655,7 @@ def load_ranker(checkpoint_path: str, device: torch.device) -> Tuple[A2FeatureRa
         item_feature_embedding_dim=model_args.get("item_feature_embedding_dim", 8),
         hidden_dim=model_args.get("hidden_dim", 256),
         dropout=model_args.get("dropout", 0.2),
+        bucket_heads=model_args.get("bucket_heads", False),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model = model.to(device)
@@ -1039,6 +1071,8 @@ def build_parser():
     train_parser.add_argument("--item_feature_embedding_dim", type=int, default=8)
     train_parser.add_argument("--hidden_dim", type=int, default=256)
     train_parser.add_argument("--dropout", type=float, default=0.2)
+    train_parser.add_argument("--bucket_heads", action="store_true",
+                              help="按历史长度桶使用专用输出头，缓解训练/test长度分布错位")
     train_parser.add_argument("--lr", type=float, default=1e-3)
     train_parser.add_argument("--weight_decay", type=float, default=1e-4)
     train_parser.add_argument("--patience", type=int, default=12)

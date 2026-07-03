@@ -6416,3 +6416,86 @@ Exp100 保护融合审计：
   - A1 相比 Exp090 有小幅正收益；
   - A2 有机会在 Exp090 `0.5035` 上继续小幅提升；
   - 风险主要来自 `len=2-3` 离线分群是否能线上转化，但 Top1 已完全保护，风险低于 Exp078/Exp093。
+
+线上反馈：
+
+- 提交时间：2026-07-03 17:10:56
+- 总分：`0.6307`
+- A1：`0.7579`
+- A2：`0.5034`
+
+结论：
+
+- Exp101 失败。
+- A1：
+  - Exp096 的无泄漏离线正收益没有转化到线上；
+  - 线上从 Exp090 的 `0.7601` 降到 `0.7579`；
+  - 后续不再用 Exp096 作为提交 A1 底座。
+- A2：
+  - `len=2-3` 严格分群 + Top1 保护没有提升；
+  - 线上从 Exp090 的 `0.5035` 降到 `0.5034`；
+  - 后续不再扩大 profile gate，也不再提交只改 Top2-10 的小门控。
+- 当前线上稳定底座重新锁定为 Exp090：
+  - A1 `0.7601`
+  - A2 `0.5035`
+
+下一步：
+
+- 停止小幅 gate/bias 路线。
+- A1 转向更大的模型差异：在 SIGN/标签传播/结构特征上尝试非神经树模型或 OOF stacking。
+- A2 只有在出现新的、经过多 split 验证且漂移可控的冷启动/短历史专家时才更新。
+
+补充快速审计：
+
+- A1 在 Exp059 的有效 SIGN 特征上尝试非神经分类器：
+  - ExtraTrees 单 split 准确率约 `0.7452`
+  - Ridge/SGD 线性模型约 `0.65-0.68`
+- 结论：
+  - 同一套 SIGN 特征换成树模型或线性模型明显弱于现有 MLP；
+  - 暂不沿 A1 树模型路线继续。
+
+### Exp-102/103：A2 历史长度桶专用输出头
+
+日期：2026-07-03
+
+背景：
+
+- A2 训练集原始历史长度分布：
+  - `len>10`: 约 `90.6%`
+  - `len=0`: 约 `0%`
+  - `len=1`: 约 `1.0%`
+  - `len=2-3`: 约 `1.6%`
+- A2 测试集历史长度分布：
+  - `len=0`: `35.15%`
+  - `len=1`: `10.03%`
+  - `len=2-3`: `44.74%`
+  - `len>10`: `9.47%`
+- 虽然 Exp045 已经用 `--random_test_like_train` 做随机截断，但模型仍然使用一个共享输出头。
+- 共享输出头可能让冷启动、短历史、长历史互相干扰。
+
+代码调整：
+
+- `framework/code/a2_feature_ranker.py`
+  - 新增 `--bucket_heads` 参数，默认关闭，旧 checkpoint 兼容。
+  - 打开后，模型保留共享 MLP hidden 表示，但按 `length_bucket(seq_len)` 选择专用输出 head。
+  - 目标是让 `len=0/1/2-3/长历史` 学习不同 target 先验和决策边界。
+- 新增脚本：
+  - `framework/scripts/run_exp102_a2_bucket_head_multiseed.sh`
+  - `framework/scripts/run_exp103_a2_bucket_head_protected_audit.sh`
+
+本地检查：
+
+- `python3 -m py_compile framework/code/a2_feature_ranker.py` 通过。
+- 旧 Exp044 checkpoint 可正常加载，`bucket_heads=False`。
+- smoke：
+  - `SEEDS=42`
+  - `EPOCHS=1`
+  - CPU 小模型
+  - 训练、融合评估、A2_alt 生成通过。
+- Exp103 小样本 smoke 能正常加载 bucket-head checkpoint 并输出保护融合审计。
+
+下一步：
+
+- 需要 GPU 正式运行 Exp102。
+- 再运行 Exp103 多 split 审计。
+- 只有当 Exp103 出现稳定正收益，才基于 Exp090 A1/A2 底座生成正式提交包。
