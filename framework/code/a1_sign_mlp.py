@@ -144,6 +144,8 @@ def parse_args():
     parser.add_argument("--no_batchnorm", action="store_true")
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--weight_decay", type=float, default=0.0005)
+    parser.add_argument("--label_smoothing", type=float, default=0.0,
+                        help="交叉熵标签平滑系数；0表示关闭")
     parser.add_argument("--epochs", type=int, default=600)
     parser.add_argument("--patience", type=int, default=80)
     parser.add_argument("--log_interval", type=int, default=25)
@@ -514,7 +516,7 @@ def train_and_eval(args):
         use_batchnorm=not args.no_batchnorm,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=float(args.label_smoothing))
 
     best_acc = -1.0
     best_epoch = 0
