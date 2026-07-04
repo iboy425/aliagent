@@ -6647,3 +6647,146 @@ GPU 返回结果：
 - 仅完成代码与脚本准备。
 - 已通过 `py_compile` 和 `bash -n`。
 - 等待 GPU 运行结果后再决定是否构造正式提交包。
+
+
+### Exp-107：A2 分桶专家模型结果
+
+日期：2026-07-04
+
+目的：
+
+- 针对测试集 `len=0/1/2-3` 占比极高的问题，训练固定历史长度专家：
+  - `expert_len0`
+  - `expert_len1`
+  - `expert_len3`
+
+GPU 返回和本地差异审计：
+
+- 原始 `hard_short`：
+  - 总体 `changed=86.58%`
+  - `top1_changed=7.39%`
+  - `Top10 overlap=93.02%`
+- 原始 `keep1_short`：
+  - 总体 `changed=86.32%`
+  - `top1_changed=0.00%`
+  - `Top10 overlap=93.02%`
+- 原始 `mixed_short`：
+  - 总体 `changed=86.49%`
+  - `top1_changed=4.60%`
+  - `Top10 overlap=93.02%`
+
+结论：
+
+- 三个原始候选都不适合作为低风险提交。
+- 即使 `keep1_short` 保留 Top1，也会大面积改第 2-10 位；线上 A2 对排序前排非常敏感，风险过高。
+- 同时发现 Exp107 的 `eval_fusion` 原脚本少传了 `--test_like_val`，导致离线分桶按训练集长历史统计，`len=0` 验证样本为 0；已修正脚本，后续评估必须使用 test-like 验证。
+
+
+### Exp-108：A1 label seed 特征审计结果
+
+日期：2026-07-04
+
+GPU 返回结果：
+
+| candidate | mean | min | max | std |
+| --- | ---: | ---: | ---: | ---: |
+| `undir_h3_seed` | 0.756712 | 0.745205 | 0.776256 | 0.010549 |
+| `undir_reverse_h3_seed` | 0.752694 | 0.746119 | 0.769863 | 0.008786 |
+| `all_h2_seed` | 0.748858 | 0.742466 | 0.768037 | 0.009665 |
+
+结论：
+
+- `label_feature_include_seed` 不保留。
+- 它低于当前 A1 主线 `0.763-0.766`，说明把原始训练标签种子直接拼进特征会让 MLP 过度依赖训练节点自身标签，泛化没有变好。
+
+
+### Exp-109：A2 分桶专家软融合
+
+日期：2026-07-04
+
+目的：
+
+- 不使用 Exp107 的整桶替换，而是把专家推荐列表作为弱排序信号做 RRF 软融合。
+- 目标是保持 Top1 和 Top10 集合基本不变，仅调整短历史桶内部顺序。
+
+候选结果：
+
+- `safe/light/mid`：
+  - 实际差异相同，说明小权重已经触发相同的 RRF 排序阈值。
+  - 总体 `changed=23.71%`
+  - `top1_changed=0.01%`
+  - `Top10 overlap=100.00%`
+  - 修改 `len=0/1/2-3`
+- `len23_only`：
+  - 总体 `changed=12.55%`
+  - `top1_changed=0.01%`
+  - `Top10 overlap=100.00%`
+  - 只修改最大短历史桶 `len=2-3`
+
+候选包：
+
+- `framework/output/exp109_a2_bucket_expert_soft/submit_len23_only/prediction.zip`
+- `framework/output/exp111_joint_soft_candidates/stable_a1_a2_len23_soft/prediction.zip`
+
+结论：
+
+- 如果要用 A2 专家信号，优先使用 `len23_only`，因为它只动最大短历史桶，且 Top1/Top10 集合几乎不漂移。
+- 该候选是小幅稳健试探，不是大幅突破。
+
+
+### Exp-110：A1 类别级 SIGN 专家选择
+
+日期：2026-07-04
+
+目的：
+
+- 验证“不同预测类别使用不同 SIGN 专家组合”是否优于全局固定组合。
+
+审计结果：
+
+| config | base_mean | loo_mean | gain | loo_min |
+| --- | ---: | ---: | ---: | ---: |
+| `mb200_gain002` | 0.764384 | 0.765114 | +0.000731 | 0.752511 |
+| `mb160_gain001` | 0.764384 | 0.764201 | -0.000183 | 0.752511 |
+| `mb120_gain001` | 0.764384 | 0.763836 | -0.000548 | 0.751598 |
+| `mb60_gain0` | 0.764384 | 0.763653 | -0.000731 | 0.751598 |
+| `mb80_gain0005` | 0.764384 | 0.763653 | -0.000731 | 0.751598 |
+
+最佳映射：
+
+- `{'0': 'base', '1': 'reverse', '2': 'base', '3': 'base', '4': 'reverse', '5': 'base', '6': 'base', '7': 'undir', '8': 'u3r4a3', '9': 'base'}`
+
+推理差异：
+
+- Exp110 A1 相比 Exp090 A1 改动 `94 / 2751 = 3.4169%`。
+- Exp110 类别分布：
+  - `{0: 79, 1: 380, 2: 285, 3: 71, 4: 1221, 5: 47, 6: 83, 7: 141, 8: 406, 9: 38}`
+- Exp090 类别分布：
+  - `{0: 75, 1: 391, 2: 257, 3: 74, 4: 1216, 5: 48, 6: 65, 7: 153, 8: 431, 9: 41}`
+
+结论：
+
+- Exp110 对自己的 SIGN base 有小幅正收益，但并未证明能超过线上最强 Exp090 meta-stack。
+- 作为 A1 线上候选风险高于 Exp090；除非有提交机会专门测 A1，否则不优先提交。
+
+
+### Exp-111：联合候选组装
+
+日期：2026-07-04
+
+候选包：
+
+1. `framework/output/exp111_joint_soft_candidates/stable_a1_a2_len23_soft/prediction.zip`
+   - A1：沿用 Exp090，线上已验证 `0.7601`
+   - A2：Exp109 `len23_only`
+   - 结论：当前最稳的候选，主要押 A2 小幅提升。
+
+2. `framework/output/exp111_joint_soft_candidates/classwise_a1_a2_len23_soft/prediction.zip`
+   - A1：Exp110 类别级专家选择
+   - A2：Exp109 `len23_only`
+   - 结论：A1 风险更高，除非想主动试探 A1，否则不优先。
+
+3. `framework/output/exp111_joint_soft_candidates/classwise_a1_a2_base/prediction.zip`
+   - A1：Exp110
+   - A2：Exp090
+   - 结论：只用于隔离 A1 效果，不适合作为唯一提交。

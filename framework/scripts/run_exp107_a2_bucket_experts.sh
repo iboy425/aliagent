@@ -131,6 +131,7 @@ PY
     --device "$DEVICE" \
     --batch_size "$BATCH_SIZE" \
     --max_len "$MAX_LEN" \
+    --test_like_val \
     --predict_truncate_len "$truncate_len" \
     --model_weights "$MODEL_WEIGHTS" \
     --output_json "$expert_dir/fusion_eval.json"
