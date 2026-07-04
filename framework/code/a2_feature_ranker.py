@@ -217,6 +217,7 @@ class A2FeatureDataset(Dataset):
         max_len: int,
         test_lengths: np.ndarray = None,
         random_test_like: bool = False,
+        fixed_truncate_len: int = -1,
     ):
         self.df = df.reset_index(drop=True)
         self.user_lookup = user_lookup
@@ -225,6 +226,7 @@ class A2FeatureDataset(Dataset):
         self.max_len = max_len
         self.test_lengths = test_lengths
         self.random_test_like = random_test_like
+        self.fixed_truncate_len = int(fixed_truncate_len)
 
     def __len__(self):
         return len(self.df)
@@ -232,7 +234,9 @@ class A2FeatureDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         seq_value = row.get(self.seq_col)
-        if self.random_test_like and self.test_lengths is not None:
+        if self.fixed_truncate_len >= 0:
+            seq_value = truncate_seq_value(seq_value, self.fixed_truncate_len)
+        elif self.random_test_like and self.test_lengths is not None:
             keep_len = int(np.random.choice(self.test_lengths))
             seq_value = truncate_seq_value(seq_value, keep_len)
 
@@ -453,6 +457,9 @@ def train(args):
         trn_df, val_df = split_train_val(train_df, args.val_ratio, args.seed)
     if (not args.train_all) and args.test_like_val:
         val_df = apply_fixed_test_like_truncation(val_df, lengths, seq_col, args.seed)
+    fixed_val_truncate_len = args.fixed_val_truncate_len
+    if fixed_val_truncate_len < 0:
+        fixed_val_truncate_len = args.fixed_truncate_len
 
     trn_dataset = A2FeatureDataset(
         trn_df,
@@ -462,8 +469,16 @@ def train(args):
         args.max_len,
         test_lengths=lengths,
         random_test_like=args.random_test_like_train,
+        fixed_truncate_len=args.fixed_truncate_len,
     )
-    val_dataset = None if args.train_all else A2FeatureDataset(val_df, user_lookup, bundle, seq_col, args.max_len)
+    val_dataset = None if args.train_all else A2FeatureDataset(
+        val_df,
+        user_lookup,
+        bundle,
+        seq_col,
+        args.max_len,
+        fixed_truncate_len=fixed_val_truncate_len,
+    )
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     pin_memory = device.type == "cuda"
@@ -518,7 +533,11 @@ def train(args):
         f"user_cols={bundle.user_cols}, item_cols={bundle.item_cols}"
     )
     val_size = 0 if val_dataset is None else len(val_dataset)
-    print(f"train={len(trn_dataset)}, val={val_size}, test_like_val={args.test_like_val}, train_all={args.train_all}")
+    print(
+        f"train={len(trn_dataset)}, val={val_size}, test_like_val={args.test_like_val}, "
+        f"train_all={args.train_all}, fixed_truncate_len={args.fixed_truncate_len}, "
+        f"fixed_val_truncate_len={fixed_val_truncate_len}"
+    )
     print("=" * 100)
 
     for epoch in range(1, args.epochs + 1):
@@ -616,7 +635,10 @@ def predict(args):
             batch = test_df.iloc[start:start + args.batch_size]
             seqs, user_feats, lens = [], [], []
             for _, row in batch.iterrows():
-                seq, seq_len = parse_item_seq_to_indices(row.get(seq_col), bundle.item2idx, args.max_len)
+                seq_value = row.get(seq_col)
+                if args.predict_truncate_len >= 0:
+                    seq_value = truncate_seq_value(seq_value, args.predict_truncate_len)
+                seq, seq_len = parse_item_seq_to_indices(seq_value, bundle.item2idx, args.max_len)
                 seqs.append(seq)
                 lens.append(seq_len)
                 user_feats.append(user_features_to_indices(str(row["uid"]), user_lookup, bundle))
@@ -716,6 +738,7 @@ def score_dataframe_with_models(
     max_len: int,
     batch_size: int,
     device: torch.device,
+    truncate_len: int = -1,
 ) -> List[Dict[str, float]]:
     """为DataFrame中每行生成模型 item 分数
 
@@ -728,7 +751,10 @@ def score_dataframe_with_models(
             batch = df.iloc[start:start + batch_size]
             seqs, user_feats, lens = [], [], []
             for _, row in batch.iterrows():
-                seq, seq_len = parse_item_seq_to_indices(row.get(seq_col), bundle.item2idx, max_len)
+                seq_value = row.get(seq_col)
+                if truncate_len >= 0:
+                    seq_value = truncate_seq_value(seq_value, truncate_len)
+                seq, seq_len = parse_item_seq_to_indices(seq_value, bundle.item2idx, max_len)
                 seqs.append(seq)
                 lens.append(seq_len)
                 user_feats.append(user_features_to_indices(str(row["uid"]), user_lookup, bundle))
@@ -963,6 +989,7 @@ def eval_fusion(args):
         args.max_len,
         args.batch_size,
         device,
+        truncate_len=args.predict_truncate_len,
     )
     targets = val_df["target_iid"].astype(str).tolist()
     bucket_weights = compute_bucket_weights(test_df, test_seq_col)
@@ -1034,6 +1061,7 @@ def predict_fusion(args):
         args.max_len,
         args.batch_size,
         device,
+        truncate_len=args.predict_truncate_len,
     )
     preds = rank_with_fusion(test_df, model_scores, seq_col, rule_context, args, args.model_weight)
     out_df = pd.DataFrame({
@@ -1081,18 +1109,26 @@ def build_parser():
     train_parser.add_argument("--log_interval", type=int, default=1)
     train_parser.add_argument("--test_like_val", action="store_true")
     train_parser.add_argument("--random_test_like_train", action="store_true")
+    train_parser.add_argument("--fixed_truncate_len", type=int, default=-1,
+                              help="训练时固定保留最近N个历史item；0表示空历史专家，-1表示不启用")
+    train_parser.add_argument("--fixed_val_truncate_len", type=int, default=-1,
+                              help="验证时固定保留最近N个历史item；默认跟随fixed_truncate_len")
     train_parser.add_argument("--train_all", action="store_true",
                               help="正式重训模式：使用全部train.csv训练，不划分验证集，不早停")
 
     pred_parser = subparsers.add_parser("predict", parents=[common])
     pred_parser.add_argument("--checkpoint", type=str, required=True)
     pred_parser.add_argument("--output_path", type=str, required=True)
+    pred_parser.add_argument("--predict_truncate_len", type=int, default=-1,
+                             help="推理时固定保留最近N个历史item；0表示按空历史推理，-1表示不截断")
 
     fusion_common = argparse.ArgumentParser(add_help=False)
     fusion_common.add_argument("--checkpoint", type=str, required=True)
     fusion_common.add_argument("--val_ratio", type=float, default=0.1)
     fusion_common.add_argument("--seed", type=int, default=42)
     fusion_common.add_argument("--test_like_val", action="store_true")
+    fusion_common.add_argument("--predict_truncate_len", type=int, default=-1,
+                               help="模型打分前固定保留最近N个历史item；用于分桶专家评估/推理")
     fusion_common.add_argument("--history_filter", type=str, default="none", choices=["none", "soft", "hard"])
     fusion_common.add_argument("--recent_n", type=int, default=18)
     fusion_common.add_argument(

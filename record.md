@@ -6614,3 +6614,36 @@ GPU 返回结果：
 - Label Smoothing 不保留为今天最后提交候选。
 - 推测原因：当前 A1 的核心收益来自训练标签经图传播形成的强监督特征，平滑标签会削弱这种信号；它没有带来更好的泛化。
 - 今天最后一次提交不应使用 Exp106。
+
+
+### Exp-107 / Exp-108：下一轮大方向实验准备
+
+日期：2026-07-04
+
+目的：
+
+- 不再围绕已有候选做 0.001 级别的 bias 微调。
+- A2 改为“按历史长度训练专家模型”，尝试解决训练集长历史为主、测试集短历史/空历史为主的分布错位。
+- A1 改为审计 `label_feature_include_seed`，验证训练标签种子块是否能继续放大标签传播特征。
+
+代码调整：
+
+- 修改 `framework/code/a2_feature_ranker.py`：
+  - 新增 `--fixed_truncate_len`，训练时固定保留最近 N 个历史 item；
+  - 新增 `--fixed_val_truncate_len`，验证时固定保留最近 N 个历史 item；
+  - 新增 `--predict_truncate_len`，推理/融合打分前固定截断历史；
+  - `score_dataframe_with_models()` 支持同样的截断参数。
+- 修改 `framework/code/a2_protected_blend.py`：
+  - 离线审计时支持 `--base_predict_truncate_len` 和 `--alt_predict_truncate_len`；
+  - 方便比较“正常 base + 截断专家 alt”的保护融合效果。
+- 新增 `framework/scripts/run_exp107_a2_bucket_experts.sh`：
+  - 训练 `expert_len0`、`expert_len1`、`expert_len3` 三类 A2 专家；
+  - 生成 `hard_short`、`keep1_short`、`mixed_short` 三个候选包。
+- 新增 `framework/scripts/run_exp108_a1_label_seed_feature_audit.sh`：
+  - 审计 A1 标签传播特征是否应加入原始 label seed 块。
+
+当前状态：
+
+- 仅完成代码与脚本准备。
+- 已通过 `py_compile` 和 `bash -n`。
+- 等待 GPU 运行结果后再决定是否构造正式提交包。

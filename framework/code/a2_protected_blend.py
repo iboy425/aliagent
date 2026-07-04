@@ -126,10 +126,12 @@ def run_eval(args):
         base_scores = score_dataframe_with_models(
             val_df, base_models, base_bundle, user_lookup, train_seq_col,
             args.max_len, args.batch_size, device,
+            truncate_len=args.base_predict_truncate_len,
         )
         alt_scores = score_dataframe_with_models(
             val_df, alt_models, alt_bundle, user_lookup, train_seq_col,
             args.max_len, args.batch_size, device,
+            truncate_len=args.alt_predict_truncate_len,
         )
         base_preds = rank_with_fusion(val_df, base_scores, train_seq_col, rule_context, args, args.base_model_weight)
         alt_preds = rank_with_fusion(val_df, alt_scores, train_seq_col, rule_context, args, args.alt_model_weight)
@@ -308,6 +310,10 @@ def parse_args():
     eval_p.add_argument("--alt_checkpoint", required=True)
     eval_p.add_argument("--base_model_weight", type=float, default=1.0)
     eval_p.add_argument("--alt_model_weight", type=float, default=22.0)
+    eval_p.add_argument("--base_predict_truncate_len", type=int, default=-1,
+                        help="base模型打分前固定截断历史；-1表示不截断")
+    eval_p.add_argument("--alt_predict_truncate_len", type=int, default=-1,
+                        help="alt模型打分前固定截断历史；用于短历史/冷启动专家审计")
     eval_p.add_argument("--split_seeds", default="42,777,2024")
     eval_p.add_argument("--seed", type=int, default=42)
     eval_p.add_argument("--val_ratio", type=float, default=0.1)
