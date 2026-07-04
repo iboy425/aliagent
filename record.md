@@ -6790,3 +6790,138 @@ GPU 返回结果：
    - A1：Exp110
    - A2：Exp090
    - 结论：只用于隔离 A1 效果，不适合作为唯一提交。
+
+线上结果：
+
+- 提交包：`framework/output/exp111_joint_soft_candidates/stable_a1_a2_len23_soft/prediction.zip`
+- 总分：`0.6318`
+- A1：`0.7601`
+- A2：`0.5035`
+
+结论：
+
+- 与 Exp090 稳定线上分数相同。
+- 只在已有 Top10 集合内重排，且 Top10 overlap=100%，对线上 A2 没有实际收益。
+- 后续必须引入新候选或换模型，不能继续做同类微重排。
+
+
+### Exp-112：A2 短历史稀疏 ranker 审计
+
+日期：2026-07-04
+
+目的：
+
+- 解决训练/测试历史长度分布错位：
+  - train 原始样本多数是长历史；
+  - test 中 `len=0/1/2-3` 占大多数。
+- 使用 ComplementNB 稀疏分类器，把用户画像、最近 item、item 类目、历史计数、长度桶组合成离散特征。
+- 训练时做 test-like 短历史增强，同时保留原始长历史样本，学习短历史条件分布。
+
+关键实现：
+
+- 新增 `framework/code/a2_sparse_short_ranker.py`。
+- 稀疏特征包括：
+  - `bucket`
+  - `u_cat_01..u_cat_08`
+  - 用户画像前缀组合
+  - 最近 5 个 item 位置特征
+  - 最近 item 的 `i_cat_01..i_cat_03/i_bucket_01`
+  - 用户画像 × 最近 item / item 类目交叉特征
+  - 历史 item count 特征
+- 新增 test-like 截断增强：
+  - 对训练样本按 test.csv 的历史长度分布裁剪历史；
+  - 同时保留原始训练样本。
+
+多 split 审计：
+
+命令核心：
+
+```bash
+python3 code/a2_sparse_short_ranker.py audit \
+  --data_path data/rec_data \
+  --test_like_val \
+  --split_seeds 42,777,2024 \
+  --model_types cnb \
+  --nb_alphas 10.0 \
+  --augment_repeats_grid 1,2 \
+  --include_original_train \
+  --output_json output/exp112_a2_sparse_short_ranker_audit/results.json
+```
+
+结果：
+
+| config | mean weighted_NDCG | min | std |
+| --- | ---: | ---: | ---: |
+| `cnb alpha=10 aug=1 include_original` | 0.520148 | 0.516540 | 0.003598 |
+| `cnb alpha=10 aug=2 include_original` | 0.519186 | 0.516420 | 0.001961 |
+
+最佳配置分 split：
+
+| split | weighted_NDCG | len=0 | len=1 | len=2-3 | len=4-10 | len>10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 42 | 0.516540 | 0.521145 | 0.465406 | 0.515643 | 0.413529 | 0.564482 |
+| 777 | 0.518843 | 0.527597 | 0.512545 | 0.514030 | 0.427136 | 0.521665 |
+| 2024 | 0.525060 | 0.545455 | 0.505911 | 0.512650 | 0.473585 | 0.531583 |
+
+结论：
+
+- 这是近期 A2 第一个有明显离线增益的新模型方向。
+- 它不是 Top10 内微调，而是会引入大量新候选。
+- 纯 sparse 线上风险较高，因为 Top1 相比稳定 A2 改动约三分之一。
+
+
+### Exp-113：A2 sparse ranker 提交候选
+
+日期：2026-07-04
+
+目的：
+
+- 用 Exp112 最佳配置在全部 train.csv 上训练 sparse ranker。
+- 组装不同风险等级的候选：
+  - 纯 sparse：最大改动，最大潜在收益，也最大风险。
+  - keep1：保留稳定 A2 Top1，只用 sparse 改第 2-10 位。
+
+候选包：
+
+1. `framework/output/exp113_a2_sparse_short_ranker_candidates/stable_a1_a2_sparse_pure/prediction.zip`
+   - A1：Exp090 稳定 A1。
+   - A2：纯 sparse ranker。
+   - 相对 Exp090 A2：
+     - `changed=100.00%`
+     - `top1_changed=33.85%`
+     - `Top10 overlap=66.47%`
+   - 结论：冲分型候选，可能大涨，也可能明显掉分。
+
+2. `framework/output/exp113_a2_sparse_short_ranker_candidates/stable_a1_a2_sparse_keep1_all/prediction.zip`
+   - A1：Exp090 稳定 A1。
+   - A2：所有历史桶保留稳定 Top1，2-10 位用 sparse 补强。
+   - 相对 Exp090 A2：
+     - `changed=100.00%`
+     - `top1_changed=0.00%`
+     - `Top10 overlap=67.00%`
+   - 结论：中高风险候选，保住 Top1，但 Top10 集合变化大。
+
+3. `framework/output/exp113_a2_sparse_short_ranker_candidates/stable_a1_a2_sparse_keep1_short/prediction.zip`
+   - A1：Exp090 稳定 A1。
+   - A2：只在 `len=0/1/2-3` 保留 Top1 后融合 sparse。
+   - 相对 Exp090 A2：
+     - `changed=89.92%`
+     - `top1_changed=0.00%`
+     - `Top10 overlap=70.46%`
+   - 结论：偏稳候选，主要针对测试集中最多的短历史用户。
+
+4. `framework/output/exp113_a2_sparse_short_ranker_candidates/stable_a1_a2_sparse_keep2_all/prediction.zip`
+   - A1：Exp090 稳定 A1。
+   - A2：所有历史桶保留稳定 Top2，3-10 位用 sparse 补强。
+   - 相对 Exp090 A2：
+     - `changed=100.00%`
+     - `top1_changed=0.00%`
+     - `Top10 overlap=68.06%`
+   - 结论：比 keep1_all 更保守，但可能牺牲 sparse 的前排收益。
+
+当前建议：
+
+- 如果只剩一次提交机会，优先考虑 `stable_a1_a2_sparse_keep1_short` 或 `stable_a1_a2_sparse_pure`：
+  - `keep1_short` 更稳，押短历史第 2-10 位；
+  - `pure` 才可能带来更大 A2 跃迁，但 Top1 漂移风险很高。
+- 若用户想冲 0.64，大概率需要承担 `pure` 或 `keep1_all` 的风险。
